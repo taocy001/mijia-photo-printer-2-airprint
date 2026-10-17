@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+*.dylib
+raster_fixture
+airprint-spool/
+*.sqlite*
+*.log
+*.jsonl
+.env*
+.DS_Store
+test-results.txt
