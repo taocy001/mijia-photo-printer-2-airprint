@@ -54,8 +54,8 @@ class BridgeCore:
     def printer_attributes(self):
         accepting = not self.blocked and self.transport_factory is not None and (self.session is None or
             self.session.job is not None and self.session.job.phase in ("completed", "aborted", "canceled"))
-        attrs = [A(4,0x42,"printer-name",b"Mijia Photo Printer 2 - six inch experimental"),
-            A(4,0x41,"printer-info",b"Experimental USB bridge; single-page six-inch profile"),
+        attrs = [A(4,0x42,"printer-name","小米照片打印机 2".encode("utf-8")),
+            A(4,0x41,"printer-info","小米照片打印机 2".encode("utf-8")),
             A(4,0x45,"printer-uri-supported",self.uri.encode()),
             A(4,0x45,"printer-uuid",self.identity.encode()),
             A(4,0x44,"uri-security-supported",b"none"),

@@ -28,7 +28,7 @@ python3 run_candidate.py --serial YOUR_USB_SERIAL \
   --allow-network YOUR_LAN_CIDR --announce --enable-experimental-live-printing
 ```
 
-Bonjour name: **Mijia Photo Printer 2 - 6 inch**. Resource: `ipp/print`. Only bind to the current private LAN address. Source addresses must be loopback or within the configured subnet. This is plain IPP without authentication or TLS: devices on the allowed LAN can submit jobs. It does not configure internet forwarding, firewall rules, CUPS, other printer queues or login services.
+Bonjour name: **小米照片打印机 2**. Resource: `ipp/print`. Only bind to the current private LAN address. Source addresses must be loopback or within the configured subnet. This is plain IPP without authentication or TLS: devices on the allowed LAN can submit jobs. It does not configure internet forwarding, firewall rules, CUPS, other printer queues or login services.
 
 The service runs until the foreground process ends. Ctrl-C stops it and unregisters its own Bonjour record. Restart manually with the same spool directory; no boot installation is performed. Pending work can continue after restart. Do not delete the spool while tasks are pending or uncertain.
 

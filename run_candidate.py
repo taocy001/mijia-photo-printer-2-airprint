@@ -14,9 +14,9 @@ from native_transport import NativeUSBTransport
 
 
 def advertisement(core, port):
-    return ["/usr/bin/dns-sd", "-R", "Mijia Photo Printer 2 - 6 inch",
+    return ["/usr/bin/dns-sd", "-R", "小米照片打印机 2",
             "_ipp._tcp,_universal", "local.", str(port), "txtvers=1", "qtotal=1",
-            "rp=ipp/print", "ty=Mijia Instant Photo Printer 2 experimental bridge",
+            "rp=ipp/print", "ty=小米照片打印机 2",
             "product=(Mijia Instant Photo Printer 2)", "Color=T", "Duplex=F", "kind=photo", "priority=50",
             "pdl="+",".join(FORMATS), "URF="+b",".join(URF).decode(),
             "UUID="+core.identity.removeprefix("urn:uuid:")]
