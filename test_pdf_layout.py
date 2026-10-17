@@ -4,7 +4,7 @@ import unittest
 from PIL import Image,ImageChops,ImageDraw
 from documents import prepare_document
 
-def photo_pdf(width=288,height=432,rotate=0,origin=(0,0),user_unit=1,inset=0,colored=False,markers=False,photo_size=None,image_box=None,extra_ops="",white_content=False):
+def photo_pdf(width=288,height=432,rotate=0,origin=(0,0),user_unit=1,inset=0,colored=False,markers=False,photo_size=None,image_box=None,extra_ops="",white_content=False,intent=None):
  landscape=width>height;im=Image.new('RGB',photo_size or ((1800,1200) if landscape else (1200,1800)),'blue')
  if white_content:im.paste('white',(0,0,im.width//3,im.height))
  if colored:im.paste('red',(0,0,im.width//2,im.height))
@@ -13,7 +13,7 @@ def photo_pdf(width=288,height=432,rotate=0,origin=(0,0),user_unit=1,inset=0,col
   for xy,color in [((0,0,im.width-1,49),'yellow'),((0,im.height-50,im.width-1,im.height-1),'cyan'),((0,0,49,im.height-1),'red'),((im.width-50,0,im.width-1,im.height-1),'green')]:d.rectangle(xy,fill=color)
  b=BytesIO();im.save(b,'JPEG',quality=95);jpg=b.getvalue();x,y=origin
  bw,bh,bx,by=image_box or (width*(1-2*inset),height*(1-2*inset),x+width*inset,y+height*inset)
- stream=(f'q {bw} 0 0 {bh} {bx} {by} cm /Photo Do Q\n'+extra_ops).encode()
+ stream=((f'q Q q /{intent} ri ' if intent else '')+f'q {bw} 0 0 {bh} {bx} {by} cm /Photo Do Q\n'+extra_ops+(' Q' if intent else '')).encode()
  objs=[b'<< /Type /Catalog /Pages 2 0 R >>',b'<< /Type /Pages /Count 1 /Kids [3 0 R] >>',f'<< /Type /Page /Parent 2 0 R /MediaBox [{x} {y} {x+width} {y+height}] /CropBox [{x} {y} {x+width} {y+height}] /Rotate {rotate} /UserUnit {user_unit} /Resources << /XObject << /Photo 5 0 R >> >> /Contents 4 0 R >>'.encode(),f'<< /Length {len(stream)} >>\nstream\n'.encode()+stream+b'endstream',f'<< /Type /XObject /Subtype /Image /Width {im.width} /Height {im.height} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length {len(jpg)} >>\nstream\n'.encode()+jpg+b'\nendstream']
  out=bytearray(b'%PDF-1.6\n');offsets=[0]
  for i,obj in enumerate(objs,1):offsets.append(len(out));out.extend(f'{i} 0 obj\n'.encode()+obj+b'\nendobj\n')
@@ -69,4 +69,20 @@ class PhotoPdfFillTests(unittest.TestCase):
   self.assertGreater(min(im.getpixel((10,900))),240);self.assertLess(im.getpixel((1200,900))[0],10)
  def test_ambiguous_pdf_falls_back_to_fit(self):
   for kw in [dict(image_box=(216,432,36,0),extra_ops='q 10 0 0 10 0 0 cm /Photo Do Q'),dict(image_box=(216,432,36,0),extra_ops='BT ET'),dict(inset=.1)]:
-   self.assertEqual(prepare_document(photo_pdf(**kw),'application/pdf',scaling='fill').jpeg,prepare_document(photo_pdf(**kw),'application/pdf',scaling='fit').jpeg)
+   a=Image.open(BytesIO(prepare_document(photo_pdf(**kw),'application/pdf',scaling='fill').jpeg)).convert('RGB')
+   b=Image.open(BytesIO(prepare_document(photo_pdf(**kw),'application/pdf',scaling='fit').jpeg)).convert('RGB')
+   self.assertIsNone(ImageChops.difference(a,b).getbbox())
+
+class RenderingIntentPdfTests(unittest.TestCase):
+ def test_ios_photo_intents_do_not_force_layout_fallback(self):
+  for intent in ['Perceptual','RelativeColorimetric','AbsoluteColorimetric','Saturation']:
+   with self.subTest(intent=intent):
+    kw=dict(photo_size=(900,1800),image_box=(216,432,36,0))
+    a=Image.open(BytesIO(prepare_document(photo_pdf(**kw,intent=intent),'application/pdf',scaling='fill').jpeg)).convert('RGB')
+    b=Image.open(BytesIO(prepare_document(photo_pdf(**kw),'application/pdf',scaling='fill').jpeg)).convert('RGB')
+    self.assertIsNone(ImageChops.difference(a,b).getbbox())
+ def test_unknown_intent_falls_back_without_cropping(self):
+  pdf=photo_pdf(photo_size=(900,1800),image_box=(216,432,36,0),intent='UnknownIntent')
+  a=Image.open(BytesIO(prepare_document(pdf,'application/pdf',scaling='fill').jpeg)).convert('RGB')
+  b=Image.open(BytesIO(prepare_document(pdf,'application/pdf',scaling='fit').jpeg)).convert('RGB')
+  self.assertIsNone(ImageChops.difference(a,b).getbbox())

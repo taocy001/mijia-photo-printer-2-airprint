@@ -27,6 +27,7 @@ struct PhotoScan { CGAffineTransform ctm=CGAffineTransformIdentity; std::vector<
 static void photo_q(CGPDFScannerRef,void *v){auto &s=*static_cast<PhotoScan*>(v);s.stack.push_back(s.ctm);}
 static void photo_Q(CGPDFScannerRef,void *v){auto &s=*static_cast<PhotoScan*>(v);if(s.stack.empty())s.valid=false;else{s.ctm=s.stack.back();s.stack.pop_back();}}
 static void photo_cm(CGPDFScannerRef sc,void *v){auto &s=*static_cast<PhotoScan*>(v);CGPDFReal n[6];for(int i=5;i>=0;--i)if(!CGPDFScannerPopNumber(sc,&n[i])){s.valid=false;return;}s.ctm=CGAffineTransformConcat(CGAffineTransformMake(n[0],n[1],n[2],n[3],n[4],n[5]),s.ctm);}
+static void photo_ri(CGPDFScannerRef sc,void *v){auto &s=*static_cast<PhotoScan*>(v);const char *name=nullptr;if(!CGPDFScannerPopName(sc,&name)||(!(!std::strcmp(name,"Perceptual")||!std::strcmp(name,"RelativeColorimetric")||!std::strcmp(name,"AbsoluteColorimetric")||!std::strcmp(name,"Saturation"))))s.valid=false;}
 static void photo_Do(CGPDFScannerRef sc,void *v){auto &s=*static_cast<PhotoScan*>(v);const char *name=nullptr;if(!CGPDFScannerPopName(sc,&name)){s.valid=false;return;}auto obj=CGPDFContentStreamGetResource(CGPDFScannerGetContentStream(sc),"XObject",name);CGPDFStreamRef stream=nullptr;if(!obj||!CGPDFObjectGetValue(obj,kCGPDFObjectTypeStream,&stream)){s.valid=false;return;}auto d=CGPDFStreamGetDictionary(stream);const char *type=nullptr;CGPDFBoolean mask=false;if(!CGPDFDictionaryGetName(d,"Subtype",&type)||std::strcmp(type,"Image")||CGPDFDictionaryGetBoolean(d,"ImageMask",&mask)||CGPDFDictionaryGetObject(d,"SMask",&obj)||CGPDFDictionaryGetObject(d,"Mask",&obj)){s.valid=false;return;}if(std::abs(s.ctm.b)>0.001||std::abs(s.ctm.c)>0.001){s.valid=false;return;}s.box=CGRectApplyAffineTransform(CGRectMake(0,0,1,1),s.ctm);++s.images;}
 static bool photo_bounds(CGPDFPageRef page,CGRect &out){
  auto pd=CGPDFPageGetDictionary(page);CGPDFArrayRef annotations=nullptr;if(CGPDFDictionaryGetArray(pd,"Annots",&annotations)&&CGPDFArrayGetCount(annotations))return false;
@@ -34,9 +35,9 @@ static bool photo_bounds(CGPDFPageRef page,CGRect &out){
  auto bytes=CGPDFStreamCopyData(stream,nullptr);if(!bytes)return false;
  std::string text((const char*)CFDataGetBytePtr(bytes),CFDataGetLength(bytes));CFRelease(bytes);
  // Reject text, paths, clipping, forms, inline images and unknown operators.
- static const std::regex tokens(R"((\s+|[-+]?(?:[0-9]+\.?[0-9]*|\.[0-9]+)|/[A-Za-z0-9_]+|cm|Do|q|Q)+)");
+ static const std::regex tokens(R"((\s+|[-+]?(?:[0-9]+\.?[0-9]*|\.[0-9]+)|/[A-Za-z0-9_]+|cm|Do|ri|q|Q)+)");
  if(!std::regex_match(text,tokens))return false;
- PhotoScan state;auto table=CGPDFOperatorTableCreate();CGPDFOperatorTableSetCallback(table,"q",photo_q);CGPDFOperatorTableSetCallback(table,"Q",photo_Q);CGPDFOperatorTableSetCallback(table,"cm",photo_cm);CGPDFOperatorTableSetCallback(table,"Do",photo_Do);
+ PhotoScan state;auto table=CGPDFOperatorTableCreate();CGPDFOperatorTableSetCallback(table,"q",photo_q);CGPDFOperatorTableSetCallback(table,"Q",photo_Q);CGPDFOperatorTableSetCallback(table,"cm",photo_cm);CGPDFOperatorTableSetCallback(table,"Do",photo_Do);CGPDFOperatorTableSetCallback(table,"ri",photo_ri);
  auto content=CGPDFContentStreamCreateWithPage(page);auto scanner=CGPDFScannerCreate(content,table,&state);bool ok=CGPDFScannerScan(scanner);CGPDFScannerRelease(scanner);CGPDFContentStreamRelease(content);CGPDFOperatorTableRelease(table);
  if(!ok||!state.valid||state.images!=1||!state.stack.empty())return false;
  CGRect crop=CGPDFPageGetBoxRect(page,kCGPDFCropBox),b=CGRectStandardize(state.box);double eps=0.1;
