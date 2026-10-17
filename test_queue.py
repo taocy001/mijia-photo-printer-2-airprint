@@ -84,7 +84,7 @@ class QueueTests(unittest.TestCase):
   self.assertEqual(self.peer.calls.count('cancel-job'),1);self.assertEqual(device,81)
  def test_six_inch_orientation_scaling(self):
   for orientation in (3,4,5,6):
-   for scaling in (b'fill',b'fit',b'none',b'auto',b'auto-fit'):
+   for scaling in (b'fill',b'fit'):
     r=self.core.handle(request(4,44,(A(2,0x23,'orientation-requested',integer(orientation)),A(2,0x44,'print-scaling',scaling))))
     self.assertEqual(decode_ipp(r).code,0)
   r=self.core.handle(request(4,45,(A(2,0x44,'media',b'na_index-3x5_3x5in'),)))
@@ -104,3 +104,12 @@ class QueueTests(unittest.TestCase):
   self.assertEqual(r.values('job-state'),[integer(6)])
   self.core.refresh();self.assertEqual(self.core.rows()[0]['phase'],'completed')
   self.assertEqual(self.peer.calls.count('print-job'),1)
+ def test_unimplemented_scaling_and_alignment_rejected(self):
+  for name,value in [('print-scaling',b'none'),('print-scaling',b'auto'),('x-image-position',b'left'),('media-type',b'stationery')]:
+   r=decode_ipp(self.core.handle(request(4,90,(A(2,0x44,name,value),))))
+   self.assertEqual(r.code,0x040b)
+ def test_only_layout_metadata_persisted(self):
+  self.put();meta=json.loads(self.core.rows()[0]['request_meta'])
+  self.assertEqual(meta['document_format'],'image/jpeg')
+  self.assertGreater(meta['document_bytes'],0)
+  self.assertNotIn('requesting-user-name',str(meta))

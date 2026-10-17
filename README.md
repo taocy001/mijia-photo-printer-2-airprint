@@ -53,3 +53,11 @@ The project implements only this printer's experimentally verified subset. No af
 Offline tests use synthetic images/raster fixtures and sanitized protocol-only response fixtures. They cover FIFO, busy/8006 waiting, transport failure, lost ACK, restart behavior, cancellation scope, supported formats, six-inch media, orientations and scaling. No test automatically accesses USB or prints paper. Local service verification uses Get-Printer-Attributes, Get-Jobs and Validate-Job only.
 
 For end-to-end validation, select the Bonjour name on an iPhone on the same LAN, select six-inch paper and one copy, and submit one photo. Check the local job state and actual paper. A discoverable Bonjour/IPP service alone is not proof of full AirPrint compatibility.
+
+## iPhone layout and receive-only diagnosis
+
+IPP scaling capabilities do not promise an iOS Photos crop editor. Only implemented fit/fill is advertised; unimplemented auto/auto-fit/none requests are rejected instead of silently becoming fit. Explicit fit is never overridden by the default fill. Placement is centered (only center is advertised); the fixed medium type is photographic. Orientation 3/4/5/6 applies to original JPEG rendering; best orientation is selected from EXIF-normalized content only when the client omits the direction constraint. Orientation 7 is not advertised and is not treated as auto. Pre-laid-out document pages are preserved without white-content trimming or a second photo crop.
+
+Actual inbound format and layout attributes (excluding titles/user identities) are recorded in the local queue metadata. Until a real client submits a document, its format and embedded layout cannot be inferred from the iPhone preview alone.
+
+`run_capture.py` is a separate, opt-in diagnostic receiver on port 8633. It is NOT started by the normal service. It advertises **Mijia Layout Capture - NO PRINT**, stores exact original document bytes privately in diagnostic-spool, and has no USB scheduling path even after restart. It never promotes captured jobs into the live print queue. Ask the operator to confirm reception before starting it; then they can submit one sample to inspect the true page geometry without consuming paper. Limits are 20 captures, 32 MiB each, and 256 MiB total. Stop it with Ctrl-C; its data remains local until deliberately removed.

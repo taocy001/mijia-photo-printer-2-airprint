@@ -15,6 +15,7 @@ class QueuedBridge(BridgeCore):
   self.db=sqlite3.connect(self.spool/'queue.sqlite',check_same_thread=False)
   self.db.row_factory=sqlite3.Row;self.db.execute('PRAGMA journal_mode=WAL');self.db.execute('PRAGMA synchronous=FULL')
   self.db.execute('CREATE TABLE IF NOT EXISTS jobs(id INTEGER PRIMARY KEY,key TEXT UNIQUE,phase TEXT,device_id INTEGER,path TEXT,bytes INTEGER,acked INTEGER DEFAULT 0,message TEXT,cancel INTEGER DEFAULT 0,created REAL)')
+  if 'request_meta' not in [r[1] for r in self.db.execute('PRAGMA table_info(jobs)')]:self.db.execute('ALTER TABLE jobs ADD COLUMN request_meta TEXT')
   self.db.execute("UPDATE jobs SET phase='unknown',message='Restart during irreversible stage; read-only reconciliation required' WHERE phase IN ('creating','uploading')");self.db.commit()
   self.isolated_render=isolated_render;self.usb_lock=threading.Lock();self.active_session=None;self.active_id=None;self.stopping=False
  def rows(self):
@@ -31,10 +32,18 @@ class QueuedBridge(BridgeCore):
   return [A(a.group,a.tag,a.name,changes.get(a.name,a.value)) for a in base]
  def render(self,req,mime,scaling,reverse):
   # PDF/raster already contain client layout. Preserve it; never crop twice.
+  orientation=None
   if mime!='image/jpeg':scaling='fit';reverse=False
-  if not self.isolated_render:return prepare_document(req.document,mime,scaling=scaling,rotate_180=reverse)
+  else:
+   values=req.values('orientation-requested')
+   orientation=struct.unpack('>i',values[0])[0] if values else None
+   if orientation is not None:reverse=False
+  if not self.isolated_render:
+   kwargs={'scaling':scaling,'rotate_180':reverse}
+   if mime=='image/jpeg':kwargs['orientation']=orientation
+   return prepare_document(req.document,mime,**kwargs)
   try:
-   r=subprocess.run([sys.executable,str(Path(__file__).with_name('render_worker.py'))],input=json.dumps({'mime':mime,'scaling':scaling,'reverse':reverse}).encode()+b'\n'+req.document,capture_output=True,timeout=30,check=True)
+   r=subprocess.run([sys.executable,str(Path(__file__).with_name('render_worker.py'))],input=json.dumps({'mime':mime,'scaling':scaling,'reverse':reverse,'orientation':orientation}).encode()+b'\n'+req.document,capture_output=True,timeout=30,check=True)
    return PreparedImage(r.stdout,0)
   except (subprocess.SubprocessError,OSError) as e:raise IppFailure(0x040b,'document renderer rejected input') from e
  def handle(self,raw):
@@ -57,6 +66,9 @@ class QueuedBridge(BridgeCore):
       with tmp.open('wb') as f:f.write(image.jpeg);f.flush();os.fsync(f.fileno())
       tmp.replace(path)
       cur=self.db.execute('INSERT INTO jobs(key,phase,path,bytes,message,created) VALUES(?,?,?,?,?,?)',(key,'pending',str(path),len(image.jpeg),'Queued; waiting for device idle',time.time()));self.db.commit()
+      allowed={'document-format','media','media-col','media-type','copies','orientation-requested','print-scaling','x-image-position','y-image-position','printer-resolution','print-quality','sides'}
+      meta={'document_format':mime,'document_bytes':len(req.document),'attributes':[{'name':a.name,'tag':a.tag,'value_hex':a.value.hex()} for a in req.attributes if a.name in allowed]}
+      self.db.execute('UPDATE jobs SET request_meta=? WHERE id=?',(json.dumps(meta),cur.lastrowid));self.db.commit()
       attrs=self.attrs(dict(self.db.execute('SELECT * FROM jobs WHERE id=?',(cur.lastrowid,)).fetchone()))
    elif req.code in (8,9,10):
     rows=self.rows()

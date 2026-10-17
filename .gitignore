@@ -9,3 +9,4 @@ airprint-spool/
 .env*
 .DS_Store
 test-results.txt
+diagnostic-spool/

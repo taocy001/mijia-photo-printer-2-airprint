@@ -41,7 +41,7 @@ class PreparedImage:
     size: tuple[int, int] = CANVAS
 
 
-def prepare_jpeg(data: bytes, *, scaling="fill", rotate_180=False, centering=(0.5,0.5)) -> PreparedImage:
+def prepare_jpeg(data: bytes, *, scaling="fill", rotate_180=False, centering=(0.5,0.5), orientation=None) -> PreparedImage:
     """EXIF orient, fit/fill portrait canvas, flatten white, JPEG quality 60..100.
 
     fill: centered crop; fit: preserve whole image with white bars. These are
@@ -71,10 +71,10 @@ def prepare_jpeg(data: bytes, *, scaling="fill", rotate_180=False, centering=(0.
             except (OSError, ValueError, ImageCms.PyCMSError) as exc:
                 raise Unsupported("invalid or unsupported embedded ICC profile") from exc
     return prepare_rgb(image.tobytes(), image.width, image.height,
-                       scaling=scaling, rotate_180=rotate_180, centering=centering)
+                       scaling=scaling, rotate_180=rotate_180, centering=centering, orientation=orientation)
 
 
-def prepare_rgb(pixels: bytes, width: int, height: int, *, scaling="fill", rotate_180=False, centering=(0.5,0.5)):
+def prepare_rgb(pixels: bytes, width: int, height: int, *, scaling="fill", rotate_180=False, centering=(0.5,0.5), orientation=None):
     if scaling not in ("fill", "fit"):
         raise Unsupported("only fill and fit are implemented")
     if width < 1 or height < 1 or width*height > 40_000_000 or len(pixels) != width*height*3:
@@ -82,16 +82,18 @@ def prepare_rgb(pixels: bytes, width: int, height: int, *, scaling="fill", rotat
     if len(centering)!=2 or any(not 0<=v<=1 for v in centering):
         raise Unsupported("crop center must be within 0..1")
     image = Image.frombytes("RGB", (width, height), pixels)
-    # Device buffer remains portrait. Rotate landscape content to use full paper.
-    if width>height:
-        image=image.transpose(Image.Transpose.ROTATE_90)
+    if orientation not in (None,3,4,5,6):raise Unsupported("unsupported explicit orientation")
+    canvas=CANVAS
+    landscape=orientation in (4,5) or orientation is None and width>height
+    if landscape:canvas=CANVAS[::-1]
     if scaling == "fill":
-        image = ImageOps.fit(image, CANVAS, Image.Resampling.LANCZOS, centering=centering)
+        image = ImageOps.fit(image, canvas, Image.Resampling.LANCZOS, centering=centering)
     else:
-        inner = ImageOps.contain(image, CANVAS, Image.Resampling.LANCZOS)
-        image = Image.new("RGB", CANVAS, "white")
-        image.paste(inner, ((CANVAS[0]-inner.width)//2, (CANVAS[1]-inner.height)//2))
-    if rotate_180:
+        inner = ImageOps.contain(image, canvas, Image.Resampling.LANCZOS)
+        image = Image.new("RGB", canvas, "white")
+        image.paste(inner, ((canvas[0]-inner.width)//2, (canvas[1]-inner.height)//2))
+    if landscape:image=image.transpose(Image.Transpose.ROTATE_90)
+    if rotate_180 or orientation in (5,6):
         image = image.transpose(Image.Transpose.ROTATE_180)
 
     def encode(q):

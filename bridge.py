@@ -82,12 +82,14 @@ class BridgeCore:
             A(4,0x21,"queued-job-count",integer(0 if accepting else 1)),
             A(4,0x33,"job-k-octets-supported",integer(1)+integer(32768)),
             A(4,0x44,"compression-supported",b"none"),
-            A(4,0x44,"media-col-supported",b"media-size"),
+            *[A(4,0x44,"media-col-supported",x) for x in (b"media-size",b"media-type",b"media-left-margin",b"media-right-margin",b"media-top-margin",b"media-bottom-margin")],
+            A(4,0x44,"media-type-default",b"photographic"),A(4,0x44,"media-type-supported",b"photographic"),
+            *[A(4,0x44,n,b"center") for n in ("x-image-position-default","x-image-position-supported","y-image-position-default","y-image-position-supported")],
             A(4,0x22,"job-ids-supported",b"\x01"),
             A(4,0x21,"printer-up-time",integer(int(time.monotonic()-self.started))),
             A(4,0x44,"print-scaling-default",b"fill"),
             A(4,0x44,"print-scaling-supported",b"fit"), A(4,0x44,"print-scaling-supported",b"fill"),
-            *[A(4,0x44,"print-scaling-supported",x) for x in (b"auto",b"auto-fit",b"none")],
+
             A(4,0x23,"print-quality-default",integer(4)), A(4,0x23,"print-quality-supported",integer(4)),
             # 300dpi describes accepted client raster rendering, not device DPI.
             A(4,0x32,"printer-resolution-default",integer(300)+integer(300)+b"\x03"),
@@ -100,6 +102,7 @@ class BridgeCore:
         attrs += [A(4,0x44,"ipp-versions-supported",v) for v in (b"1.1",b"2.0")]
         attrs += [A(4,0x44,"urf-supported",v) for v in URF]
         size = {"media-size": (0x34,{"x-dimension":(0x21,integer(10160)),"y-dimension":(0x21,integer(15240))})}
+        size["media-type"]=(0x44,b"photographic")
         size.update({k:(0x21,integer(0)) for k in ('media-left-margin','media-right-margin','media-top-margin','media-bottom-margin')})
         attrs.extend(A(4,0x21,k,integer(0)) for k in ('media-left-margin-supported','media-right-margin-supported','media-top-margin-supported','media-bottom-margin-supported'))
         attrs.append(A(4,0x34,"media-col-default",encode_collection(size)))
@@ -127,13 +130,16 @@ class BridgeCore:
         if self._one(req,"job-hold-until",b"no-hold") != b"no-hold": raise IppFailure(0x040b,"job holding not implemented")
         if self._one(req,"print-color-mode",b"color") != b"color": raise IppFailure(0x040b,"color profile only")
         scaling = self._one(req,"print-scaling",b"fill").decode("ascii")
-        if scaling not in ("fit","fill","auto","auto-fit","none"): raise IppFailure(0x040b,"unsupported scaling")
-        scaling={'auto':'fill','auto-fit':'fit','none':'fit'}.get(scaling,scaling)
+        if scaling not in ("fit","fill"): raise IppFailure(0x040b,"only implemented fit/fill scaling supported")
+        for name in ('x-image-position','y-image-position'):
+            if self._one(req,name,b'center')!=b'center':raise IppFailure(0x040b,'only centered placement implemented')
+        if self._one(req,'media-type',b'photographic')!=b'photographic':raise IppFailure(0x040b,'photographic paper only')
         media_col = self._one(req,"media-col")
         if media_col is not None:
             col = collection_values(media_col)
-            if set(col)-{"media-size","media-left-margin","media-right-margin","media-top-margin","media-bottom-margin"}:
+            if set(col)-{"media-size","media-type","media-left-margin","media-right-margin","media-top-margin","media-bottom-margin"}:
                 raise IppFailure(0x040b,"unsupported media collection member")
+            if col.get('media-type',(0x44,b'photographic'))!=(0x44,b'photographic'):raise IppFailure(0x040b,'photographic paper only')
             size = col.get("media-size")
             if size != (0x34,{"x-dimension":(0x21,integer(10160)),"y-dimension":(0x21,integer(15240))}):
                 raise IppFailure(0x040b,"six-inch media size required")

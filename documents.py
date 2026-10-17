@@ -6,9 +6,9 @@ from offline import prepare_jpeg, prepare_rgb, Unsupported
 FORMATS = ("image/jpeg", "application/pdf", "image/urf", "image/pwg-raster")
 
 
-def prepare_document(data, mime, *, scaling="fill", rotate_180=False, centering=(0.5,0.5)):
+def prepare_document(data, mime, *, scaling="fill", rotate_180=False, centering=(0.5,0.5), orientation=None):
     if mime == "image/jpeg":
-        return prepare_jpeg(data, scaling=scaling, rotate_180=rotate_180, centering=centering)
+        return prepare_jpeg(data, scaling=scaling, rotate_180=rotate_180, centering=centering, orientation=orientation)
     if mime not in FORMATS:
         raise Unsupported("unsupported document format")
     lib = c.CDLL(str(Path(__file__).with_name("libmijia_render.dylib")))

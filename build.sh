@@ -9,4 +9,4 @@ mkdir -p fixtures
 ./raster_fixture pwg fixtures/one-page.pwg
 ./raster_fixture urf fixtures/two-pages.urf
 ./raster_fixture pwg fixtures/two-pages.pwg
-python3 -m unittest -v test_offline test_protocol test_documents test_bridge test_queue
+python3 -m unittest -v test_offline test_protocol test_documents test_bridge test_queue test_layout test_capture
