@@ -7,6 +7,8 @@ xcrun clang++ -std=c++17 -arch arm64 -Wall -Wextra -Werror -Wno-deprecated-decla
 mkdir -p fixtures
 ./raster_fixture urf fixtures/one-page.urf
 ./raster_fixture pwg fixtures/one-page.pwg
+./raster_fixture urf fixtures/landscape.urf
+./raster_fixture pwg fixtures/landscape.pwg
 ./raster_fixture urf fixtures/two-pages.urf
 ./raster_fixture pwg fixtures/two-pages.pwg
-python3 -m unittest -v test_offline test_protocol test_documents test_bridge test_queue test_layout test_capture test_http
+python3 -m unittest -v test_offline test_protocol test_documents test_bridge test_queue test_layout test_capture test_http test_pdf_layout

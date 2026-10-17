@@ -53,6 +53,8 @@ def main():
     except BlockingIOError:parser.error('another queue worker owns this spool')
     core=QueuedBridge(f"ipp://{args.hostname}:{args.port}/ipp/print",transport,root/"airprint-spool",dedupe_seconds=args.dedupe_content_window)
     # No socket or subprocess is created before this explicit main() path.
+    import os,hashlib
+    from ipp_trace import record
     from aiohttp import web
     registration = None
     app = make_app(core,allowed_networks=args.allow_network or ["127.0.0.0/8"])
@@ -69,7 +71,9 @@ def main():
     if args.announce:
         app.on_startup.append(announce)
         app.on_cleanup.append(unregister)
-    web.run_app(app,host=[args.host]+args.additional_host,port=args.port,access_log=None)
+    record(core,{'lifecycle':'startup','pid':os.getpid(),'renderer_sha256':hashlib.sha256((root/'libmijia_render.dylib').read_bytes()).hexdigest()})
+    try:web.run_app(app,host=[args.host]+args.additional_host,port=args.port,access_log=None)
+    finally:record(core,{'lifecycle':'shutdown','pid':os.getpid()})
 
 
 if __name__ == "__main__": main()

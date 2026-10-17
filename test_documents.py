@@ -28,7 +28,9 @@ class DocumentTests(unittest.TestCase):
         prepared = prepare_document(simple_pdf(), 'application/pdf')
         with Image.open(BytesIO(prepared.jpeg)) as im:
             self.assertEqual(im.size, (1216,1824))
+            self.assertLess(im.getpixel((600,100))[0],10)
             self.assertGreater(im.getpixel((600,100))[2],240)  # PDF top is blue
+            self.assertLess(im.getpixel((600,1700))[2],10)
             self.assertGreater(im.getpixel((600,1700))[0],240)
 
     def test_pdf_multiple_pages_and_corruption_rejected(self):
@@ -41,7 +43,9 @@ class DocumentTests(unittest.TestCase):
             result = prepare_document(raw,mime)
             with Image.open(BytesIO(result.jpeg)) as im:
                 self.assertEqual(im.size,(1216,1824))
+                self.assertLess(im.getpixel((600,100))[2],10)
                 self.assertGreater(im.getpixel((600,100))[0],240)
+                self.assertLess(im.getpixel((600,1700))[0],10)
                 self.assertGreater(im.getpixel((600,1700))[2],240)
 
     def test_multiple_raster_pages_and_bad_signature_rejected(self):
@@ -52,3 +56,12 @@ class DocumentTests(unittest.TestCase):
 
 
 if __name__ == '__main__': unittest.main()
+
+class LandscapeRasterTests(unittest.TestCase):
+    def test_landscape_urf_and_pwg_rotate_without_white_padding(self):
+        for ext,mime in [('pwg','image/pwg-raster'),('urf','image/urf')]:
+            result=prepare_document(Path('fixtures/landscape.'+ext).read_bytes(),mime)
+            with Image.open(BytesIO(result.jpeg)) as im:
+                left=im.getpixel((20,900));right=im.getpixel((1190,900))
+                self.assertGreater(left[0],240);self.assertLess(left[2],10)
+                self.assertGreater(right[2],240);self.assertLess(right[0],10)

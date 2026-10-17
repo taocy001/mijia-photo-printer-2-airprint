@@ -334,7 +334,8 @@ def make_app(core=None, *, allowed_networks=None):
         async def loop():
             while True:
                 await asyncio.sleep(5)
-                await asyncio.to_thread(core.refresh)
+                try:await asyncio.to_thread(core.refresh)
+                except Exception as exc:record(core,{'background_worker_error':stack(exc)})
         app['poller']=asyncio.create_task(loop())
     async def cleanup(app):
         app['poller'].cancel()

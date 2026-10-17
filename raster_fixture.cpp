@@ -13,10 +13,11 @@ int main(int argc, char **argv) {
     cups_raster_t *r = cupsRasterOpen(fd, apple ? CUPS_RASTER_WRITE_APPLE : CUPS_RASTER_WRITE_PWG);
     if (!r) { close(fd); return 4; }
     cups_page_header2_t h{};
-    h.cupsWidth = 1200; h.cupsHeight = 1800;
+    const bool landscape = std::strstr(argv[2], "landscape");
+    h.cupsWidth = landscape ? 1800 : 1200; h.cupsHeight = landscape ? 1200 : 1800;
     h.HWResolution[0] = h.HWResolution[1] = 300;
-    h.PageSize[0] = 288; h.PageSize[1] = 432;
-    h.cupsPageSize[0] = 288; h.cupsPageSize[1] = 432;
+    h.PageSize[0] = landscape ? 432 : 288; h.PageSize[1] = landscape ? 288 : 432;
+    h.cupsPageSize[0] = h.PageSize[0]; h.cupsPageSize[1] = h.PageSize[1];
     h.cupsBitsPerColor = 8; h.cupsBitsPerPixel = 24;
     h.cupsNumColors = 3; h.cupsColorSpace = CUPS_CSPACE_SRGB;
     h.cupsColorOrder = CUPS_ORDER_CHUNKED; h.cupsBytesPerLine = h.cupsWidth*3;

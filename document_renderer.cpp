@@ -37,16 +37,25 @@ static int render_pdf(const unsigned char *data, size_t size, std::vector<unsign
         CGPDFDocumentRelease(doc); return fail(err, cap, "invalid PDF page box");
     }
     double aspect = page_width/page_height;
-    if (aspect >= 1216.0/1824.0) { width = 1216; height = std::max(1U, unsigned(std::round(1216/aspect))); }
-    else { height = 1824; width = std::max(1U, unsigned(std::round(1824*aspect))); }
+    const double target_width = aspect > 1 ? 1824.0 : 1216.0;
+    const double target_height = aspect > 1 ? 1216.0 : 1824.0;
+    if (aspect >= target_width/target_height) { width = unsigned(target_width); height = std::max(1U, unsigned(std::round(target_width/aspect))); }
+    else { height = unsigned(target_height); width = std::max(1U, unsigned(std::round(target_height*aspect))); }
     std::vector<unsigned char> rgba(size_t(width)*height*4, 255);
     CGColorSpaceRef space = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
     CGContextRef context = CGBitmapContextCreate(rgba.data(), width, height, 8, width*4,
                                                 space, kCGImageAlphaNoneSkipLast | kCGBitmapByteOrder32Big);
     CGColorSpaceRelease(space);
     if (!context) { CGPDFDocumentRelease(doc); return fail(err, cap, "cannot create PDF bitmap"); }
+    // Do not rely on GetDrawingTransform to upscale PDF points to bitmap pixels.
+    // On the tested macOS runtime it centers small pages at unit scale even in a
+    // larger destination rectangle. Normalize rotation/origin at natural page
+    // size, then explicitly convert those page units to target raster pixels.
     CGAffineTransform transform = CGPDFPageGetDrawingTransform(page, kCGPDFCropBox,
-        CGRectMake(0, 0, width, height), 0, true);
+        CGRectMake(0, 0, page_width, page_height), 0, true);
+    const double scale = std::min(double(width)/page_width, double(height)/page_height);
+    CGContextTranslateCTM(context, (width-page_width*scale)/2, (height-page_height*scale)/2);
+    CGContextScaleCTM(context, scale, scale);
     CGContextConcatCTM(context, transform); CGContextDrawPDFPage(context, page);
     CGContextRelease(context); CGPDFDocumentRelease(doc);
     rgb.resize(size_t(width)*height*3);

@@ -79,3 +79,11 @@ A real iOS Photos request used PDF, one copy, 4x6 zero margins and print-quality
 An empty device queue with category=sleep and error=0 is eligible for normal job creation, as the vendor treats both IDLE (20) and SLEEP (30) as ready-to-submit states. No guessed wake, reset or power command is sent. Other device activity/errors still wait.
 
 Optional --dedupe-content-window SECONDS conservatively reuses identical document/options tasks across changed client request IDs while active or within the configured terminal window. This can merge an intentional immediate duplicate photo submission; use it only when that tradeoff is desired. The default is disabled; exact request deduplication remains persistent regardless. It never replays an uncertain task.
+
+## PDF pixel scaling correction
+
+PDF points are explicitly mapped to output pixels with a uniform scale and centered placement. The page transform is composed at natural page size to preserve rotation and crop-box origin. Landscape pages use a landscape raster before the existing physical-paper orientation step. The previous renderer could leave a small point-sized page centered in a much larger pixel canvas; both portrait and landscape PDFs were affected. No content-based white trimming or second image crop is added.
+
+Synthetic regression coverage includes four edge markers, portrait/landscape pages, 90/270-degree page rotations, nonzero crop-box origins, UserUnit, intentional document margins, and landscape URF/PWG. All 75 offline tests pass. An observed faulty final upload was preserved privately and its geometry reproduced with a synthetic landscape PDF. The original client PDF was unavailable, so the fix still requires a separately authorized physical-paper check.
+
+The manual temporary service records lifecycle events, renderer hash and persistent runtime output. Unexpected poller exceptions are logged without document data. This does not install a startup service or enable automatic restart.
