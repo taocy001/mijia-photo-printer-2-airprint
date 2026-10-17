@@ -8,10 +8,11 @@ from protocol import PhotoSession,Job,DeviceJobState,ProtocolError
 TERMINAL=('completed','aborted','canceled')
 STATE={'receiving':4,'pending':3,'creating':5,'uploading':5,'uploaded':5,'processing':5,'unknown':6,'held':6,'waiting_device':3,'completed':9,'aborted':8,'canceled':7}
 class QueuedBridge(BridgeCore):
- def __init__(self,uri,transport_factory,spool,*,isolated_render=True,dedupe_seconds=0):
+ def __init__(self,uri,transport_factory,spool,*,isolated_render=True,dedupe_seconds=0,retain_layout_evidence=False):
   super().__init__(uri,transport_factory)
   self.lock=threading.RLock()
   self.dedupe_seconds=dedupe_seconds
+  self.retain_layout_evidence=retain_layout_evidence
   self.spool=Path(spool);self.spool.mkdir(parents=True,exist_ok=True);os.chmod(self.spool,0o700)
   self.db=sqlite3.connect(self.spool/'queue.sqlite',check_same_thread=False)
   self.db.row_factory=sqlite3.Row;self.db.execute('PRAGMA journal_mode=WAL');self.db.execute('PRAGMA synchronous=FULL')
@@ -35,10 +36,22 @@ class QueuedBridge(BridgeCore):
   base=super().printer_attributes();rows=self.rows();n=sum(x['phase'] not in TERMINAL for x in rows);unknown=any(x['phase']=='unknown' for x in rows);busy=any(x['phase'] in ('creating','uploading','uploaded','processing') for x in rows)
   changes={'queued-job-count':integer(n),'printer-state':integer(5 if unknown else 4 if busy else 3),'printer-is-accepting-jobs':bytes([n<20 and not unknown]),'printer-state-message':b'Six inch only; persistent FIFO; one copy per job','printer-state-reasons':b'paused' if unknown else b'none'}
   return [A(a.group,a.tag,a.name,changes.get(a.name,a.value)) for a in base]+[A(4,0x23,"operations-supported",integer(x)) for x in (5,6)]
+ def retain_evidence(self,req,mime,image=None):
+  if not self.retain_layout_evidence:return
+  root=self.spool/'layout-evidence';root.mkdir(mode=0o700,exist_ok=True)
+  key=hashlib.sha256(req.document).hexdigest();target=root/(key+('.final.jpg' if image is not None else '.input'))
+  if target.exists():return
+  data=image.jpeg if image is not None else req.document
+  if sum(p.stat().st_size for p in root.iterdir() if p.is_file())+len(data)>256*1024*1024 or (image is None and len(list(root.glob('*.input')))>=20):raise IppFailure(0x0507,'layout evidence limit reached; review retained local diagnostics')
+  with target.open('xb') as f:
+   os.chmod(target,0o600);f.write(data);f.flush();os.fsync(f.fileno())
  def render(self,req,mime,scaling,reverse):
-  # PDF/raster already contain client layout. Preserve it; never crop twice.
+  self.retain_evidence(req,mime)
+  # Recognized single-photo PDF may fill; ambiguous document pages preserve layout.
   orientation=None
-  if mime!='image/jpeg':scaling='fit';reverse=False
+  if mime!='image/jpeg':
+   if mime!='application/pdf':scaling='fit'
+   reverse=False
   else:
    values=req.values('orientation-requested')
    orientation=struct.unpack('>i',values[0])[0] if values else None
@@ -46,10 +59,10 @@ class QueuedBridge(BridgeCore):
   if not self.isolated_render:
    kwargs={'scaling':scaling,'rotate_180':reverse}
    if mime=='image/jpeg':kwargs['orientation']=orientation
-   return prepare_document(req.document,mime,**kwargs)
+   image=prepare_document(req.document,mime,**kwargs);self.retain_evidence(req,mime,image);return image
   try:
    r=subprocess.run([sys.executable,str(Path(__file__).with_name('render_worker.py'))],input=json.dumps({'mime':mime,'scaling':scaling,'reverse':reverse,'orientation':orientation}).encode()+b'\n'+req.document,capture_output=True,timeout=30,check=True)
-   return PreparedImage(r.stdout,0)
+   image=PreparedImage(r.stdout,0);self.retain_evidence(req,mime,image);return image
   except (subprocess.SubprocessError,OSError) as e:raise IppFailure(0x040b,'document renderer rejected input') from e
  def handle(self,raw):
   req=decode_ipp(raw);op=[A(1,0x47,'attributes-charset',b'utf-8'),A(1,0x48,'attributes-natural-language',b'en')];attrs=[];status=0;groups=[]

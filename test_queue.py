@@ -89,13 +89,13 @@ class QueueTests(unittest.TestCase):
     self.assertEqual(decode_ipp(r).code,0)
   r=self.core.handle(request(4,45,(A(2,0x44,'media',b'na_index-3x5_3x5in'),)))
   self.assertEqual(decode_ipp(r).code,0x040b)
- def test_already_laid_out_document_forces_fit(self):
+ def test_pdf_passes_fill_to_conservative_photo_recognizer(self):
   import queued_bridge
   called=[];original=queued_bridge.prepare_document
   queued_bridge.prepare_document=lambda *a,**k:(called.append(k) or original(jpeg(),'image/jpeg',**k))
   try:self.core.render(decode_ipp(request(2,data=b'pdf')),'application/pdf','fill',True)
   finally:queued_bridge.prepare_document=original
-  self.assertEqual(called[0],{'scaling':'fit','rotate_180':False})
+  self.assertEqual(called[0],{'scaling':'fill','rotate_180':False})
 
  def test_device_held_maps_stopped_without_recreating(self):
   self.put();self.peer.state=4;self.core.refresh()
@@ -147,3 +147,16 @@ class QueueTests(unittest.TestCase):
    return n
   self.peer.write=write;self.core.refresh();self.assertEqual(self.peer.calls.count('print-job'),1)
   self.assertEqual(self.core.rows()[0]['phase'],'processing')
+
+class EvidenceRetentionTests(unittest.TestCase):
+ def test_opt_in_retains_original_and_final_without_usb(self):
+  import tempfile
+  from pathlib import Path
+  with tempfile.TemporaryDirectory() as folder:
+   core=QueuedBridge('ipp://localhost/ipp/print',lambda:None,folder,isolated_render=False,retain_layout_evidence=True)
+   req=decode_ipp(request(2,data=jpeg()));image=core.render(req,'image/jpeg','fill',False)
+   files=list((Path(folder)/'layout-evidence').iterdir())
+   self.assertEqual(len(files),2)
+   self.assertTrue(any(p.read_bytes()==req.document for p in files));self.assertTrue(any(p.read_bytes()==image.jpeg for p in files))
+   self.assertTrue(all(p.stat().st_mode&0o777==0o600 for p in files))
+   core.db.close()

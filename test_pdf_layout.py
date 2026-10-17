@@ -4,14 +4,16 @@ import unittest
 from PIL import Image,ImageChops,ImageDraw
 from documents import prepare_document
 
-def photo_pdf(width=288,height=432,rotate=0,origin=(0,0),user_unit=1,inset=0,colored=False,markers=False):
- landscape=width>height;im=Image.new('RGB',(1800,1200) if landscape else (1200,1800),'blue')
+def photo_pdf(width=288,height=432,rotate=0,origin=(0,0),user_unit=1,inset=0,colored=False,markers=False,photo_size=None,image_box=None,extra_ops="",white_content=False):
+ landscape=width>height;im=Image.new('RGB',photo_size or ((1800,1200) if landscape else (1200,1800)),'blue')
+ if white_content:im.paste('white',(0,0,im.width//3,im.height))
  if colored:im.paste('red',(0,0,im.width//2,im.height))
  if markers:
   d=ImageDraw.Draw(im)
   for xy,color in [((0,0,im.width-1,49),'yellow'),((0,im.height-50,im.width-1,im.height-1),'cyan'),((0,0,49,im.height-1),'red'),((im.width-50,0,im.width-1,im.height-1),'green')]:d.rectangle(xy,fill=color)
  b=BytesIO();im.save(b,'JPEG',quality=95);jpg=b.getvalue();x,y=origin
- stream=f'q {width*(1-2*inset)} 0 0 {height*(1-2*inset)} {x+width*inset} {y+height*inset} cm /Photo Do Q\n'.encode()
+ bw,bh,bx,by=image_box or (width*(1-2*inset),height*(1-2*inset),x+width*inset,y+height*inset)
+ stream=(f'q {bw} 0 0 {bh} {bx} {by} cm /Photo Do Q\n'+extra_ops).encode()
  objs=[b'<< /Type /Catalog /Pages 2 0 R >>',b'<< /Type /Pages /Count 1 /Kids [3 0 R] >>',f'<< /Type /Page /Parent 2 0 R /MediaBox [{x} {y} {x+width} {y+height}] /CropBox [{x} {y} {x+width} {y+height}] /Rotate {rotate} /UserUnit {user_unit} /Resources << /XObject << /Photo 5 0 R >> >> /Contents 4 0 R >>'.encode(),f'<< /Length {len(stream)} >>\nstream\n'.encode()+stream+b'endstream',f'<< /Type /XObject /Subtype /Image /Width {im.width} /Height {im.height} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length {len(jpg)} >>\nstream\n'.encode()+jpg+b'\nendstream']
  out=bytearray(b'%PDF-1.6\n');offsets=[0]
  for i,obj in enumerate(objs,1):offsets.append(len(out));out.extend(f'{i} 0 obj\n'.encode()+obj+b'\nendobj\n')
@@ -50,3 +52,21 @@ class PdfLayoutTests(unittest.TestCase):
     self.assertTrue(all(min(p)<80 for p in samples),samples)
     self.assertTrue(any(p[0]>200 and p[1]<80 for p in samples))
     self.assertTrue(any(p[1]>70 and p[0]<80 for p in samples))
+
+class PhotoPdfFillTests(unittest.TestCase):
+ def render(self,**kw):
+  return Image.open(BytesIO(prepare_document(photo_pdf(**kw),'application/pdf',scaling='fill').jpeg)).convert('RGB')
+ def test_skinny_portrait_uses_image_boundary(self):
+  im=self.render(photo_size=(900,1800),image_box=(216,432,36,0))
+  for xy in [(10,900),(1200,900),(600,10),(600,1810)]:
+   self.assertGreater(im.getpixel(xy)[2],240);self.assertLess(im.getpixel(xy)[0],10)
+ def test_wider_portrait_landscape_rotation(self):
+  for kw in [dict(photo_size=(1200,1600),image_box=(288,384,0,24)),dict(width=432,height=288,photo_size=(1600,900),image_box=(432,243,0,22.5)),dict(photo_size=(900,1800),image_box=(216,432,36,0),rotate=90)]:
+   im=self.render(**kw)
+   for xy in [(10,900),(1200,900),(600,10),(600,1810)]:self.assertLess(im.getpixel(xy)[0],10)
+ def test_real_white_content_preserved(self):
+  im=self.render(photo_size=(900,1800),image_box=(216,432,36,0),white_content=True)
+  self.assertGreater(min(im.getpixel((10,900))),240);self.assertLess(im.getpixel((1200,900))[0],10)
+ def test_ambiguous_pdf_falls_back_to_fit(self):
+  for kw in [dict(image_box=(216,432,36,0),extra_ops='q 10 0 0 10 0 0 cm /Photo Do Q'),dict(image_box=(216,432,36,0),extra_ops='BT ET'),dict(inset=.1)]:
+   self.assertEqual(prepare_document(photo_pdf(**kw),'application/pdf',scaling='fill').jpeg,prepare_document(photo_pdf(**kw),'application/pdf',scaling='fit').jpeg)

@@ -19,7 +19,14 @@ def prepare_document(data, mime, *, scaling="fill", rotate_180=False, centering=
     lib.mijia_render_free.restype = None
     buffer, err = c.create_string_buffer(data), c.create_string_buffer(256)
     output, width, height = c.c_void_p(), c.c_uint32(), c.c_uint32()
-    ok = lib.mijia_render(buffer, len(data), mime.encode(), c.byref(output),
+    photo=False
+    if mime == 'application/pdf' and scaling == 'fill':
+        lib.mijia_pdf_photo_bounds.argtypes=[c.c_void_p,c.c_size_t]
+        lib.mijia_pdf_photo_bounds.restype=c.c_int
+        photo=bool(lib.mijia_pdf_photo_bounds(buffer,len(data)))
+    native_mime='application/x-mijia-photo-pdf' if photo else mime
+    if mime == 'application/pdf' and not photo: scaling='fit'
+    ok = lib.mijia_render(buffer, len(data), native_mime.encode(), c.byref(output),
                           c.byref(width), c.byref(height), err, len(err))
     if not ok: raise Unsupported(err.value.decode())
     try:
