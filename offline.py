@@ -74,6 +74,14 @@ def prepare_jpeg(data: bytes, *, scaling="fill", rotate_180=False, centering=(0.
                        scaling=scaling, rotate_180=rotate_180, centering=centering, orientation=orientation)
 
 
+def best_photo_orientation(width,height):
+    """Choose 0/90 degrees by retained area under center-fill; ties stay natural."""
+    ratio=width/height;target=CANVAS[0]/CANVAS[1]
+    normal=min(ratio/target,target/ratio)
+    turned=min((1/ratio)/target,target/(1/ratio))
+    return 4 if turned>normal+1e-12 else 3
+
+
 def prepare_rgb(pixels: bytes, width: int, height: int, *, scaling="fill", rotate_180=False, centering=(0.5,0.5), orientation=None):
     if scaling not in ("fill", "fit"):
         raise Unsupported("only fill and fit are implemented")
@@ -84,7 +92,7 @@ def prepare_rgb(pixels: bytes, width: int, height: int, *, scaling="fill", rotat
     image = Image.frombytes("RGB", (width, height), pixels)
     if orientation not in (None,3,4,5,6):raise Unsupported("unsupported explicit orientation")
     canvas=CANVAS
-    landscape=orientation in (4,5) or orientation is None and width>height
+    landscape=orientation in (4,5) or orientation is None and best_photo_orientation(width,height)==4
     if landscape:canvas=CANVAS[::-1]
     if scaling == "fill":
         image = ImageOps.fit(image, canvas, Image.Resampling.LANCZOS, centering=centering)

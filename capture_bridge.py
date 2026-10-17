@@ -3,12 +3,13 @@ import hashlib,json,time,os,struct
 from pathlib import Path
 from queued_bridge import QueuedBridge
 from bridge import IppFailure,integer
-from offline import decode_ipp,encode_ipp,Message,Attribute as A
+from offline import PreparedImage,decode_ipp,encode_ipp,Message,Attribute as A
 ALLOWED={'document-format','media','media-col','media-type','copies','orientation-requested','print-scaling','x-image-position','y-image-position','printer-resolution','print-quality','sides'}
 class CaptureBridge(QueuedBridge):
  def __init__(self,uri,spool):
   def forbidden():raise AssertionError('receive-only service cannot open USB')
   super().__init__(uri,forbidden,spool,isolated_render=False)
+ def render(self,req,mime,scaling,reverse):return PreparedImage(req.document,0)
  def refresh(self):return # No path into USB scheduler, including after restart.
  def printer_attributes(self):
   attrs=super().printer_attributes()

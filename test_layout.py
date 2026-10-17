@@ -43,3 +43,8 @@ class LayoutTests(unittest.TestCase):
  def test_none_orientation_is_not_accepted_as_auto(self):
   from offline import Unsupported
   with self.assertRaises(Unsupported):prepare_jpeg(jpeg(Image.new('RGB',(1800,1200),'blue')),orientation=7)
+ def test_best_orientation_maximizes_retained_area_and_ties_preserve(self):
+  from offline import best_photo_orientation
+  self.assertEqual(best_photo_orientation(4000,3000),4)
+  self.assertEqual(best_photo_orientation(3000,4000),3)
+  self.assertEqual(best_photo_orientation(2000,2000),3)

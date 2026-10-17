@@ -288,6 +288,18 @@ def make_app(core=None, *, allowed_networks=None):
     import asyncio
     core = core or BridgeCore()
     gate=asyncio.Semaphore(1)
+    from ipp_trace import record,describe,stack
+    @web.middleware
+    async def trace(request,handler):
+        event={'method':request.method,'route':request.path if request.path in ('/ipp/print','/ipp/print/') or request.path.startswith('/ipp/print/jobs/') and request.path.rsplit('/',1)[-1].isdigit() else '<unmatched-path>','content_type':request.content_type,
+               'content_length':request.content_length,'expect_continue':request.headers.get('Expect','').lower()=='100-continue',
+               'chunked':'chunked' in request.headers.get('Transfer-Encoding','').lower()}
+        request['diagnostic_event']=event
+        try:
+            response=await handler(request);event['http_status']=response.status;return response
+        except Exception as exc:
+            event['http_status']=getattr(exc,'status',500);event['exception']=stack(exc);raise
+        finally:record(core,event)
     async def post(request):
         if allowed_networks:
             try:
@@ -295,18 +307,28 @@ def make_app(core=None, *, allowed_networks=None):
                 if not peer.is_loopback and not any(peer in ipaddress.ip_network(n) for n in allowed_networks):
                     return web.Response(status=403,text="local network only")
             except ValueError:return web.Response(status=403)
-        if gate.locked():return web.Response(status=503,text="one request at a time")
+        if gate.locked() and (request.content_length is None or request.content_length>65536):
+            return web.Response(status=503,text="document processing busy; retry later")
         if request.content_type != "application/ipp":
             return web.Response(status=415,text="application/ipp required")
         try:
-            async with gate:
-                raw = await asyncio.wait_for(request.read(),timeout=15)
-                response = await asyncio.to_thread(core.handle,raw)
+            raw = await asyncio.wait_for(request.read(),timeout=15)
+            request['diagnostic_event']['ipp_request']=describe(raw)
+            operation=decode_ipp(raw).code
+            if operation in (2,6):
+                async with gate:response=await asyncio.to_thread(core.handle,raw)
+            else:response=await asyncio.to_thread(core.handle,raw)
+            parsed=decode_ipp(response)
+            request['diagnostic_event']['ipp_status']=parsed.code
+            messages=[x.decode('utf-8',errors='replace') for x in parsed.values('status-message')]
+            safe_reasons=('operation not supported','unsupported scaling','only implemented fit/fill scaling supported','six-inch media only','document format not implemented','single-page renderer rejected document','normal quality only','one final document required','document already supplied or task closed')
+            request['diagnostic_event']['validation_reason']=[m if m in safe_reasons else '<server validation message omitted>' for m in messages]
             return web.Response(body=response,content_type="application/ipp")
         except Unsupported:
             return web.Response(status=400,text="invalid IPP request")
-    app = web.Application(client_max_size=32*1024*1024)
+    app = web.Application(client_max_size=32*1024*1024,middlewares=[trace])
     app.router.add_post("/ipp/print",post)
+    app.router.add_post("/ipp/print/",post)
     app.router.add_post("/ipp/print/jobs/{job_id}",post)
     async def poller(app):
         async def loop():

@@ -6,7 +6,7 @@ from offline import Attribute as A,Message,decode_ipp,encode_ipp,PreparedImage
 from documents import prepare_document
 from protocol import PhotoSession,Job,DeviceJobState,ProtocolError
 TERMINAL=('completed','aborted','canceled')
-STATE={'pending':3,'creating':5,'uploading':5,'uploaded':5,'processing':5,'unknown':6,'held':6,'waiting_device':3,'completed':9,'aborted':8,'canceled':7}
+STATE={'receiving':4,'pending':3,'creating':5,'uploading':5,'uploaded':5,'processing':5,'unknown':6,'held':6,'waiting_device':3,'completed':9,'aborted':8,'canceled':7}
 class QueuedBridge(BridgeCore):
  def __init__(self,uri,transport_factory,spool,*,isolated_render=True):
   super().__init__(uri,transport_factory)
@@ -17,6 +17,9 @@ class QueuedBridge(BridgeCore):
   self.db.execute('CREATE TABLE IF NOT EXISTS jobs(id INTEGER PRIMARY KEY,key TEXT UNIQUE,phase TEXT,device_id INTEGER,path TEXT,bytes INTEGER,acked INTEGER DEFAULT 0,message TEXT,cancel INTEGER DEFAULT 0,created REAL)')
   if 'request_meta' not in [r[1] for r in self.db.execute('PRAGMA table_info(jobs)')]:self.db.execute('ALTER TABLE jobs ADD COLUMN request_meta TEXT')
   self.db.execute("UPDATE jobs SET phase='unknown',message='Restart during irreversible stage; read-only reconciliation required' WHERE phase IN ('creating','uploading')");self.db.commit()
+  for col in ('template','document_key'):
+   if col not in [r[1] for r in self.db.execute('PRAGMA table_info(jobs)')]:self.db.execute('ALTER TABLE jobs ADD COLUMN '+col+' TEXT')
+  self.db.commit()
   self.isolated_render=isolated_render;self.usb_lock=threading.Lock();self.active_session=None;self.active_id=None;self.stopping=False
  def rows(self):
   with self.lock:return [dict(x) for x in self.db.execute('SELECT * FROM jobs ORDER BY id')]
@@ -24,12 +27,12 @@ class QueuedBridge(BridgeCore):
   with self.lock:
    self.db.execute('UPDATE jobs SET '+','.join(k+'=?' for k in fields)+' WHERE id=?',(*fields.values(),jid));self.db.commit()
  def attrs(self,j):
-  state=STATE[j['phase']];reason={'pending':'job-queued','unknown':'job-hold-until-specified','held':'printer-stopped','waiting_device':'job-queued','completed':'job-completed-successfully','aborted':'aborted-by-system','canceled':'job-canceled-by-user'}.get(j['phase'],'job-printing')
+  state=STATE[j['phase']];reason={'receiving':'job-data-insufficient','pending':'job-queued','unknown':'job-hold-until-specified','held':'printer-stopped','waiting_device':'job-queued','completed':'job-completed-successfully','aborted':'aborted-by-system','canceled':'job-canceled-by-user'}.get(j['phase'],'job-printing')
   return [A(2,0x21,'job-id',integer(j['id'])),A(2,0x45,'job-uri',(self.uri+'/jobs/'+str(j['id'])).encode()),A(2,0x23,'job-state',integer(state)),A(2,0x44,'job-state-reasons',reason.encode()),A(2,0x41,'job-state-message',j['message'].encode()[:512])]
  def printer_attributes(self):
   base=super().printer_attributes();rows=self.rows();n=sum(x['phase'] not in TERMINAL for x in rows);unknown=any(x['phase']=='unknown' for x in rows);busy=any(x['phase'] in ('creating','uploading','uploaded','processing') for x in rows)
   changes={'queued-job-count':integer(n),'printer-state':integer(5 if unknown else 4 if busy else 3),'printer-is-accepting-jobs':bytes([n<20 and not unknown]),'printer-state-message':b'Six inch only; persistent FIFO; one copy per job','printer-state-reasons':b'paused' if unknown else b'none'}
-  return [A(a.group,a.tag,a.name,changes.get(a.name,a.value)) for a in base]
+  return [A(a.group,a.tag,a.name,changes.get(a.name,a.value)) for a in base]+[A(4,0x23,"operations-supported",integer(x)) for x in (5,6)]
  def render(self,req,mime,scaling,reverse):
   # PDF/raster already contain client layout. Preserve it; never crop twice.
   orientation=None
@@ -51,6 +54,43 @@ class QueuedBridge(BridgeCore):
   try:
    if req.code==11:attrs=self.printer_attributes()
    elif req.code==4:self._validate(req)
+   elif req.code==5:
+    self._validate(req);key=hashlib.sha256(raw).hexdigest()
+    with self.lock:
+     old=self.db.execute('SELECT * FROM jobs WHERE key=?',(key,)).fetchone()
+     if old:attrs=self.attrs(dict(old))
+     else:
+      if sum(j['phase'] not in TERMINAL for j in self.rows())>=20:raise IppFailure(0x0507,'queue limit 20')
+      allowed={'document-format','media','media-col','media-type','copies','sides','orientation-requested','print-scaling','x-image-position','y-image-position','printer-resolution','print-quality','compression'}
+      template=[{'group':a.group,'tag':a.tag,'name':a.name,'hex':a.value.hex()} for a in req.attributes if a.name in allowed]
+      cur=self.db.execute('INSERT INTO jobs(key,phase,path,bytes,message,created,template) VALUES(?,?,?,?,?,?,?)',(key,'receiving','',0,'Awaiting one final Send-Document',time.time(),json.dumps(template)));self.db.commit()
+      attrs=self.attrs(dict(self.db.execute('SELECT * FROM jobs WHERE id=?',(cur.lastrowid,)).fetchone()))
+   elif req.code==6:
+    val=self._one(req,'job-id')
+    if val is None:val=integer(int(self._one(req,'job-uri',b'').decode().rsplit('/',1)[-1]))
+    if len(val)!=4:raise IppFailure(0x0400,'invalid job id')
+    jid=struct.unpack('>i',val)[0]
+    if self._one(req,'last-document')!=b'\x01':raise IppFailure(0x040b,'one final document required')
+    rows=[j for j in self.rows() if j['id']==jid]
+    if not rows:raise IppFailure(0x0406,'job not found')
+    j=rows[0];dk=hashlib.sha256(req.document).hexdigest()
+    if j['phase']!='receiving':
+     if j.get('document_key')==dk:attrs=self.attrs(j)
+     else:raise IppFailure(0x0405,'document already supplied or task closed')
+    else:
+     saved=[A(x['group'],x['tag'],x['name'],bytes.fromhex(x['hex'])) for x in json.loads(j['template'])]
+     # Send-Document carries the final format; other job attributes come from Create-Job.
+     formats=req.values('document-format')
+     if formats:saved=[a for a in saved if a.name!='document-format']+[A(1,0x49,'document-format',formats[0])]
+     merged=Message(req.version,2,req.request_id,tuple(saved),req.document)
+     mime,scaling,reverse=self._validate(merged)
+     if sum(p.stat().st_size for p in self.spool.glob('*.jpg'))>256*1024*1024:raise IppFailure(0x0507,'spool disk limit')
+     image=self.render(merged,mime,scaling,reverse);path=self.spool/(j['key']+'.jpg');tmp=path.with_suffix('.tmp')
+     with tmp.open('wb') as f:f.write(image.jpeg);f.flush();os.fsync(f.fileno())
+     tmp.replace(path)
+     meta={'document_format':mime,'document_bytes':len(req.document),'attributes':[{'name':a.name,'tag':a.tag,'value_hex':a.value.hex()} for a in saved]}
+     self.change(jid,phase='pending',path=str(path),bytes=len(image.jpeg),document_key=dk,request_meta=json.dumps(meta),message='Document accepted; waiting for device idle')
+     attrs=self.attrs(next(x for x in self.rows() if x['id']==jid))
    elif req.code==2:
     mime,scaling,reverse=self._validate(req);key=hashlib.sha256(raw).hexdigest()
     with self.lock:
@@ -88,7 +128,7 @@ class QueuedBridge(BridgeCore):
      if not match:raise IppFailure(0x0406,'job not found')
      j=match[0]
      if req.code==8:
-      if j['phase']=='pending':self.change(jid,phase='canceled',message='Canceled before device submission');j['phase']='canceled'
+      if j['phase'] in ('pending','receiving'):self.change(jid,phase='canceled',message='Canceled before device submission');j['phase']='canceled'
       elif j['phase'] not in TERMINAL:
        if j['phase']=='unknown':raise IppFailure(0x0500,'uncertain task; cancellation not confirmed')
        self.change(jid,cancel=1,message='Client requested cancellation; awaiting device confirmation')
@@ -123,7 +163,7 @@ class QueuedBridge(BridgeCore):
  def _tick(self):
   rows=self.rows()
   if any(j['phase']=='unknown' for j in rows):return
-  jobs=[j for j in rows if j['phase'] not in TERMINAL]
+  jobs=[j for j in rows if j['phase'] not in TERMINAL and j['phase']!='receiving']
   if not jobs:return
   j=jobs[0];jid=j['id'];s=self.active_session
   try:

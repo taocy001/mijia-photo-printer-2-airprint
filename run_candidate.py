@@ -27,6 +27,7 @@ def main():
     parser.add_argument("--serial", required=True)
     parser.add_argument("--hostname", required=True, help="this Mac's actual .local hostname")
     parser.add_argument("--host", default="127.0.0.1", )
+    parser.add_argument("--additional-host",action="append",default=[])
     parser.add_argument("--port", type=int, default=8632)
     parser.add_argument("--announce", action="store_true")
     parser.add_argument("--allow-network",action="append",default=[])
@@ -39,6 +40,7 @@ def main():
     import ipaddress
     address=ipaddress.ip_address(args.host)
     if args.announce and (address.is_loopback or not address.is_private):parser.error("Bonjour requires private LAN address")
+    if any(not ipaddress.ip_address(x).is_private for x in args.additional_host):parser.error("additional hosts must be private/local")
     root = Path(__file__).parent
     def transport():
         return NativeUSBTransport(serial=args.serial,library=root/"libmijia_usb.dylib").open()
@@ -66,7 +68,7 @@ def main():
     if args.announce:
         app.on_startup.append(announce)
         app.on_cleanup.append(unregister)
-    web.run_app(app,host=args.host,port=args.port,access_log=None)
+    web.run_app(app,host=[args.host]+args.additional_host,port=args.port,access_log=None)
 
 
 if __name__ == "__main__": main()

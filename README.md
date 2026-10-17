@@ -61,3 +61,13 @@ IPP scaling capabilities do not promise an iOS Photos crop editor. Only implemen
 Actual inbound format and layout attributes (excluding titles/user identities) are recorded in the local queue metadata. Until a real client submits a document, its format and embedded layout cannot be inferred from the iPhone preview alone.
 
 `run_capture.py` is a separate, opt-in diagnostic receiver on port 8633. It is NOT started by the normal service. It advertises **Mijia Layout Capture - NO PRINT**, stores exact original document bytes privately in diagnostic-spool, and has no USB scheduling path even after restart. It never promotes captured jobs into the live print queue. Ask the operator to confirm reception before starting it; then they can submit one sample to inspect the true page geometry without consuming paper. Limits are 20 captures, 32 MiB each, and 256 MiB total. Stop it with Ctrl-C; its data remains local until deliberately removed.
+
+## IPP transport compatibility and diagnostics
+
+The live queue supports both Print-Job and Create-Job followed by one final Send-Document. A Create-Job without a document is held locally and never sent to USB. Repeated Send-Document calls for the same document/local task reuse the existing task, including after completion; they never submit a second image. Non-final/multiple-document requests remain unsupported. Lightweight capability/status requests can run during document preparation. HTTP Expect: 100-continue and chunked input are tested on loopback without USB.
+
+Metadata-only IPP diagnostics record HTTP method, bounded route, content type/length, Expect/chunked flags, operation/request ID, allowlisted layout attributes and error status. They exclude usernames, document titles and image bytes. Logs rotate at 2 MiB. Raw document capture remains separately opt-in and is not enabled in the live service.
+
+When the advertised hostname publishes IPv6 addresses, bind the corresponding local address with --additional-host and authorize the matching local CIDR with --allow-network. Keep bindings on private/local addresses only. Bonjour re-registration changes this service only; no system-wide mDNS flushing is required. Seeing an old display name on a phone alone is not evidence of the failure's root cause.
+
+Automatic JPEG layout explicitly compares retained area for 0/90-degree placement and selects the lesser crop. Equal retained area preserves the EXIF-normalized natural direction. Explicit client fit/direction requests remain constraints, rather than being silently overridden by the photo default. Already-laid-out pages are never treated as a bag of removable white pixels.
