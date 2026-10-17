@@ -95,3 +95,7 @@ For fill requests, a single-image PDF with only balanced q/Q, matrix transforms 
 The optional --retain-layout-evidence flag saves original inputs and final raster uploads privately, mode 0600, under the spool's layout-evidence directory; at most 20 distinct documents and 256 MiB. It defaults off. At the limit new rendering is rejected instead of discarding evidence. These files must never be committed or uploaded with source. Previously completed jobs cannot be reconstructed after their inputs/output files were discarded.
 
 The photo-page recognizer also accepts the four standard rendering intents via ri (including the iPhone's Perceptual). The intent changes color handling, not geometry. Retained client PDFs showed that rejecting this operator caused both landscape and portrait pages to fall back to fit and preserve page padding. Both exact documents now recognize and re-render to full-canvas image bounds offline. Unknown intents and complex page operators still fall back. The 82-test suite compares decoded image pixels, avoiding unrelated embedded ICC profile timestamp differences. Physical output after this correction still needs separate verification.
+
+## Physical validation status
+
+After the iPhone PDF rendering-intent correction, the operator confirmed the physical photo output passed verification. This validates the tested photo workflow on the tested device and paper; it does not establish physical validation for every advertised input format, client application, media variant or future firmware. Offline regression coverage remains 82 tests.
