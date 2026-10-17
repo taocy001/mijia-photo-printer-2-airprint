@@ -90,7 +90,7 @@ class BridgeCore:
             A(4,0x44,"print-scaling-default",b"fill"),
             A(4,0x44,"print-scaling-supported",b"fit"), A(4,0x44,"print-scaling-supported",b"fill"),
 
-            A(4,0x23,"print-quality-default",integer(4)), A(4,0x23,"print-quality-supported",integer(4)),
+            A(4,0x23,"print-quality-default",integer(5)), A(4,0x23,"print-quality-supported",integer(5)),
             # 300dpi describes accepted client raster rendering, not device DPI.
             A(4,0x32,"printer-resolution-default",integer(300)+integer(300)+b"\x03"),
             A(4,0x32,"printer-resolution-supported",integer(300)+integer(300)+b"\x03"),
@@ -124,7 +124,7 @@ class BridgeCore:
         orientation=self._one(req,"orientation-requested",integer(3))
         if orientation not in tuple(integer(x) for x in (3,4,5,6)):
             raise IppFailure(0x040b,"unsupported orientation")
-        if self._one(req,"print-quality",integer(4)) != integer(4):raise IppFailure(0x040b,"normal quality only")
+        if self._one(req,"print-quality",integer(5)) not in (integer(4),integer(5)):raise IppFailure(0x040b,"unsupported quality; high quality is default")
         if self._one(req,"printer-resolution",integer(300)+integer(300)+b"\x03") != integer(300)+integer(300)+b"\x03":raise IppFailure(0x040b,"300 dpi client raster only")
         if self._one(req,"number-up",integer(1)) != integer(1): raise IppFailure(0x040b,"number-up not implemented")
         if self._one(req,"job-hold-until",b"no-hold") != b"no-hold": raise IppFailure(0x040b,"job holding not implemented")

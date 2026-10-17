@@ -129,3 +129,21 @@ class QueueTests(unittest.TestCase):
   raw=request(6,202,(A(1,0x21,'job-id',integer(1)),A(1,0x22,'last-document',b'\x00')),jpeg())
   self.assertEqual(decode_ipp(self.core.handle(raw)).code,0x040b)
   self.core.refresh();self.assertFalse(self.peer.calls)
+ def test_ios_high_quality_pdf_validation(self):
+  attrs=(A(1,0x49,'document-format',b'application/pdf'),A(2,0x23,'print-quality',integer(5)),A(2,0x21,'copies',integer(1)))
+  self.assertEqual(decode_ipp(self.core.handle(request(4,1307,attrs))).code,0)
+ def test_opt_in_content_retry_guard_handles_new_request_ids(self):
+  self.core.dedupe_seconds=300
+  self.put(1308);self.put(1313)
+  self.assertEqual(len(self.core.rows()),1)
+  self.core.refresh();self.core.refresh();self.put(1318)
+  self.assertEqual(len(self.core.rows()),1);self.assertEqual(self.peer.calls.count('print-job'),1)
+ def test_sleep_empty_error_free_is_vendor_ready_state(self):
+  self.put();original=self.peer.write
+  def write(data,t):
+   n=original(data,t)
+   if data.startswith(b'cmd json\n') and json.loads(data[9:])['method']=='get_prop':
+    c=json.loads(data[9:]);self.peer.responses[-1]=json.dumps({'id':c['id'],'result':{'category':'sleep','sub-category':'idle','error':0}}).encode()
+   return n
+  self.peer.write=write;self.core.refresh();self.assertEqual(self.peer.calls.count('print-job'),1)
+  self.assertEqual(self.core.rows()[0]['phase'],'processing')

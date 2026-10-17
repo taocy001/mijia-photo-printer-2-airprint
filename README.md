@@ -71,3 +71,11 @@ Metadata-only IPP diagnostics record HTTP method, bounded route, content type/le
 When the advertised hostname publishes IPv6 addresses, bind the corresponding local address with --additional-host and authorize the matching local CIDR with --allow-network. Keep bindings on private/local addresses only. Bonjour re-registration changes this service only; no system-wide mDNS flushing is required. Seeing an old display name on a phone alone is not evidence of the failure's root cause.
 
 Automatic JPEG layout explicitly compares retained area for 0/90-degree placement and selects the lesser crop. Equal retained area preserves the EXIF-normalized natural direction. Explicit client fit/direction requests remain constraints, rather than being silently overridden by the photo default. Already-laid-out pages are never treated as a bag of removable white pixels.
+
+## Device readiness and photo quality compatibility
+
+A real iOS Photos request used PDF, one copy, 4x6 zero margins and print-quality=5. The bridge now advertises high quality as its default and accepts normal/high hints; both use the printer's fixed photo mode and bounded high-quality JPEG encoding, without claiming a new physical resolution. Rejecting this real high-quality hint had prevented the request from reaching the local queue.
+
+An empty device queue with category=sleep and error=0 is eligible for normal job creation, as the vendor treats both IDLE (20) and SLEEP (30) as ready-to-submit states. No guessed wake, reset or power command is sent. Other device activity/errors still wait.
+
+Optional --dedupe-content-window SECONDS conservatively reuses identical document/options tasks across changed client request IDs while active or within the configured terminal window. This can merge an intentional immediate duplicate photo submission; use it only when that tradeoff is desired. The default is disabled; exact request deduplication remains persistent regardless. It never replays an uncertain task.

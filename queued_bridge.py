@@ -8,16 +8,17 @@ from protocol import PhotoSession,Job,DeviceJobState,ProtocolError
 TERMINAL=('completed','aborted','canceled')
 STATE={'receiving':4,'pending':3,'creating':5,'uploading':5,'uploaded':5,'processing':5,'unknown':6,'held':6,'waiting_device':3,'completed':9,'aborted':8,'canceled':7}
 class QueuedBridge(BridgeCore):
- def __init__(self,uri,transport_factory,spool,*,isolated_render=True):
+ def __init__(self,uri,transport_factory,spool,*,isolated_render=True,dedupe_seconds=0):
   super().__init__(uri,transport_factory)
   self.lock=threading.RLock()
+  self.dedupe_seconds=dedupe_seconds
   self.spool=Path(spool);self.spool.mkdir(parents=True,exist_ok=True);os.chmod(self.spool,0o700)
   self.db=sqlite3.connect(self.spool/'queue.sqlite',check_same_thread=False)
   self.db.row_factory=sqlite3.Row;self.db.execute('PRAGMA journal_mode=WAL');self.db.execute('PRAGMA synchronous=FULL')
   self.db.execute('CREATE TABLE IF NOT EXISTS jobs(id INTEGER PRIMARY KEY,key TEXT UNIQUE,phase TEXT,device_id INTEGER,path TEXT,bytes INTEGER,acked INTEGER DEFAULT 0,message TEXT,cancel INTEGER DEFAULT 0,created REAL)')
   if 'request_meta' not in [r[1] for r in self.db.execute('PRAGMA table_info(jobs)')]:self.db.execute('ALTER TABLE jobs ADD COLUMN request_meta TEXT')
   self.db.execute("UPDATE jobs SET phase='unknown',message='Restart during irreversible stage; read-only reconciliation required' WHERE phase IN ('creating','uploading')");self.db.commit()
-  for col in ('template','document_key'):
+  for col in ('template','document_key','content_key'):
    if col not in [r[1] for r in self.db.execute('PRAGMA table_info(jobs)')]:self.db.execute('ALTER TABLE jobs ADD COLUMN '+col+' TEXT')
   self.db.commit()
   self.isolated_render=isolated_render;self.usb_lock=threading.Lock();self.active_session=None;self.active_id=None;self.stopping=False
@@ -26,6 +27,7 @@ class QueuedBridge(BridgeCore):
  def change(self,jid,**fields):
   with self.lock:
    self.db.execute('UPDATE jobs SET '+','.join(k+'=?' for k in fields)+' WHERE id=?',(*fields.values(),jid));self.db.commit()
+   if fields.get('phase') in TERMINAL:self.db.execute('UPDATE jobs SET created=? WHERE id=?',(time.time(),jid));self.db.commit()
  def attrs(self,j):
   state=STATE[j['phase']];reason={'receiving':'job-data-insufficient','pending':'job-queued','unknown':'job-hold-until-specified','held':'printer-stopped','waiting_device':'job-queued','completed':'job-completed-successfully','aborted':'aborted-by-system','canceled':'job-canceled-by-user'}.get(j['phase'],'job-printing')
   return [A(2,0x21,'job-id',integer(j['id'])),A(2,0x45,'job-uri',(self.uri+'/jobs/'+str(j['id'])).encode()),A(2,0x23,'job-state',integer(state)),A(2,0x44,'job-state-reasons',reason.encode()),A(2,0x41,'job-state-message',j['message'].encode()[:512])]
@@ -93,8 +95,13 @@ class QueuedBridge(BridgeCore):
      attrs=self.attrs(next(x for x in self.rows() if x['id']==jid))
    elif req.code==2:
     mime,scaling,reverse=self._validate(req);key=hashlib.sha256(raw).hexdigest()
+    relevant={'document-format','copies','media','media-col','media-type','print-quality','print-scaling','orientation-requested'}
+    options=sorted((a.name,a.value.hex()) for a in req.attributes if a.name in relevant)
+    content_key=hashlib.sha256(req.document+json.dumps(options).encode()).hexdigest()
     with self.lock:
      old=self.db.execute('SELECT * FROM jobs WHERE key=?',(key,)).fetchone()
+     if old is None and self.dedupe_seconds:
+      old=self.db.execute("SELECT * FROM jobs WHERE content_key=? AND (phase NOT IN ('completed','aborted','canceled') OR created>?) ORDER BY id DESC LIMIT 1",(content_key,time.time()-self.dedupe_seconds)).fetchone()
      if old:attrs=self.attrs(dict(old))
     if not attrs:
      rows=self.rows()
@@ -106,6 +113,7 @@ class QueuedBridge(BridgeCore):
       with tmp.open('wb') as f:f.write(image.jpeg);f.flush();os.fsync(f.fileno())
       tmp.replace(path)
       cur=self.db.execute('INSERT INTO jobs(key,phase,path,bytes,message,created) VALUES(?,?,?,?,?,?)',(key,'pending',str(path),len(image.jpeg),'Queued; waiting for device idle',time.time()));self.db.commit()
+      self.db.execute('UPDATE jobs SET content_key=? WHERE id=?',(content_key,cur.lastrowid));self.db.commit()
       allowed={'document-format','media','media-col','media-type','copies','orientation-requested','print-scaling','x-image-position','y-image-position','printer-resolution','print-quality','sides'}
       meta={'document_format':mime,'document_bytes':len(req.document),'attributes':[{'name':a.name,'tag':a.tag,'value_hex':a.value.hex()} for a in req.attributes if a.name in allowed]}
       self.db.execute('UPDATE jobs SET request_meta=? WHERE id=?',(json.dumps(meta),cur.lastrowid));self.db.commit()
@@ -175,7 +183,7 @@ class QueuedBridge(BridgeCore):
    if j['phase']=='pending':
     ids=s.command('get-job-id-list',{});status=s.command('get_prop','status')
     if not isinstance(ids,dict) or not isinstance(status,dict):raise ProtocolError('invalid readiness response')
-    if ids.get('job-id-list') not in ('',[]) or status.get('category')!='idle' or status.get('error')!=0:
+    if ids.get('job-id-list') not in ('',[]) or status.get('category') not in ('idle','sleep') or status.get('error')!=0:
      self.change(jid,message='Waiting for device idle; external job or device alert');return
     with self.lock:
      current=self.db.execute('SELECT phase FROM jobs WHERE id=?',(jid,)).fetchone()
