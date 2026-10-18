@@ -1,12 +1,14 @@
 # Mijia Instant Photo Printer 2 — experimental macOS AirPrint bridge
 
-A user-space USB adapter and temporary IPP/Bonjour service for the Mijia Instant Photo Printer 2 (ZMRSHZP02HT, USB VID 302C / PID 3008). A real six-inch photograph has completed through the USB implementation and its output was confirmed by the operator. IPP discovery, capabilities and Validate-Job have passed local checks. iPhone-to-paper validation is still pending.
+米家照片打印机 2 macOS 驱动实验项目。
+
+A user-space USB adapter and temporary IPP/Bonjour service for the Mijia Instant Photo Printer 2 (ZMRSHZP02HT, USB VID 302C / PID 3008). A real six-inch photograph has completed through the USB implementation and its output was confirmed by the operator. IPP discovery, capabilities and Validate-Job have passed local checks. The operator subsequently confirmed the tested iPhone photo workflow passed physical output verification.
 
 ## Scope
 
 Six-inch 4×6-inch paper only (IPP `na_index-4x6_4x6in`, 10160×15240 hundredths of a millimeter). One page and one copy per job; up to 20 local queued jobs. No four-inch paper, multi-page printing, duplex, textured coating, automatic installation or system printer configuration.
 
-JPEG inputs default to centered fill: preserve aspect ratio and crop edges. Fit preserves the entire photo with white margins. EXIF orientation is applied and landscape content is rotated into the device's 1216×1824 buffer without stretching. Reverse orientations are supported. PDF/URF/PWG inputs preserve the client's already-laid-out page with fit, without a second crop. Requested zero margins describe the full device image canvas; precise mechanical edge tolerances have not been measured.
+JPEG inputs default to centered fill: preserve aspect ratio and crop edges. Fit preserves the entire photo with white margins. EXIF orientation is applied and landscape content is rotated into the device's 1216×1824 buffer without stretching. Reverse orientations are supported. Recognized single-photo PDFs use the transformed image boundary for minimal-crop fill; ambiguous PDFs and URF/PWG preserve the client's page layout with fit. Requested zero margins describe the full device image canvas; precise mechanical edge tolerances have not been measured.
 
 ## Build
 
@@ -84,7 +86,7 @@ Optional --dedupe-content-window SECONDS conservatively reuses identical documen
 
 PDF points are explicitly mapped to output pixels with a uniform scale and centered placement. The page transform is composed at natural page size to preserve rotation and crop-box origin. Landscape pages use a landscape raster before the existing physical-paper orientation step. The previous renderer could leave a small point-sized page centered in a much larger pixel canvas; both portrait and landscape PDFs were affected. No content-based white trimming or second image crop is added.
 
-Synthetic regression coverage includes four edge markers, portrait/landscape pages, 90/270-degree page rotations, nonzero crop-box origins, UserUnit, intentional document margins, and landscape URF/PWG. All 75 offline tests pass. An observed faulty final upload was preserved privately and its geometry reproduced with a synthetic landscape PDF. The original client PDF was unavailable, so the fix still requires a separately authorized physical-paper check.
+Synthetic regression coverage includes four edge markers, portrait/landscape pages, 90/270-degree page rotations, nonzero crop-box origins, UserUnit, intentional document margins, and landscape URF/PWG. All 75 offline tests pass. An observed faulty final upload was preserved privately and its geometry reproduced with a synthetic landscape PDF. The original client PDF was unavailable, so that earlier diagnosis did not by itself establish physical correctness. Later retained client PDFs and operator verification are described below.
 
 The manual temporary service records lifecycle events, renderer hash and persistent runtime output. Unexpected poller exceptions are logged without document data. This does not install a startup service or enable automatic restart.
 
@@ -94,7 +96,7 @@ For fill requests, a single-image PDF with only balanced q/Q, matrix transforms 
 
 The optional --retain-layout-evidence flag saves original inputs and final raster uploads privately, mode 0600, under the spool's layout-evidence directory; at most 20 distinct documents and 256 MiB. It defaults off. At the limit new rendering is rejected instead of discarding evidence. These files must never be committed or uploaded with source. Previously completed jobs cannot be reconstructed after their inputs/output files were discarded.
 
-The photo-page recognizer also accepts the four standard rendering intents via ri (including the iPhone's Perceptual). The intent changes color handling, not geometry. Retained client PDFs showed that rejecting this operator caused both landscape and portrait pages to fall back to fit and preserve page padding. Both exact documents now recognize and re-render to full-canvas image bounds offline. Unknown intents and complex page operators still fall back. The 82-test suite compares decoded image pixels, avoiding unrelated embedded ICC profile timestamp differences. Physical output after this correction still needs separate verification.
+The photo-page recognizer also accepts the four standard rendering intents via ri (including the iPhone's Perceptual). The intent changes color handling, not geometry. Retained client PDFs showed that rejecting this operator caused both landscape and portrait pages to fall back to fit and preserve page padding. Both exact documents now recognize and re-render to full-canvas image bounds offline. Unknown intents and complex page operators still fall back. The 82-test suite compares decoded image pixels, avoiding unrelated embedded ICC profile timestamp differences. The operator subsequently confirmed the tested physical photo output passed verification; see the scope limits below.
 
 ## Physical validation status
 
