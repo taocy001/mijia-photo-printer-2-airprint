@@ -39,7 +39,7 @@ class DocumentTests(unittest.TestCase):
 
     def test_pwg_and_urf_srgb_rasters(self):
         for ext, mime in [('pwg','image/pwg-raster'), ('urf','image/urf')]:
-            raw = Path('fixtures/one-page.'+ext).read_bytes()
+            raw = (Path(__file__).parent/'fixtures'/('one-page.'+ext)).read_bytes()
             result = prepare_document(raw,mime)
             with Image.open(BytesIO(result.jpeg)) as im:
                 self.assertEqual(im.size,(1216,1824))
@@ -51,7 +51,7 @@ class DocumentTests(unittest.TestCase):
     def test_multiple_raster_pages_and_bad_signature_rejected(self):
         for ext, mime in [('pwg','image/pwg-raster'), ('urf','image/urf')]:
             with self.assertRaises(Unsupported):
-                prepare_document(Path('fixtures/two-pages.'+ext).read_bytes(),mime)
+                prepare_document((Path(__file__).parent/'fixtures'/('two-pages.'+ext)).read_bytes(),mime)
             with self.assertRaises(Unsupported): prepare_document(b'bad raster',mime)
 
 
@@ -60,7 +60,7 @@ if __name__ == '__main__': unittest.main()
 class LandscapeRasterTests(unittest.TestCase):
     def test_landscape_urf_and_pwg_rotate_without_white_padding(self):
         for ext,mime in [('pwg','image/pwg-raster'),('urf','image/urf')]:
-            result=prepare_document(Path('fixtures/landscape.'+ext).read_bytes(),mime)
+            result=prepare_document((Path(__file__).parent/'fixtures'/('landscape.'+ext)).read_bytes(),mime)
             with Image.open(BytesIO(result.jpeg)) as im:
                 left=im.getpixel((20,900));right=im.getpixel((1190,900))
                 self.assertGreater(left[0],240);self.assertLess(left[2],10)

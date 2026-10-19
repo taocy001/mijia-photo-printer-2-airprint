@@ -11,7 +11,7 @@ def prepare_document(data, mime, *, scaling="fill", rotate_180=False, centering=
         return prepare_jpeg(data, scaling=scaling, rotate_180=rotate_180, centering=centering, orientation=orientation)
     if mime not in FORMATS:
         raise Unsupported("unsupported document format")
-    lib = c.CDLL(str(Path(__file__).with_name("libmijia_render.dylib")))
+    lib = c.CDLL(str(Path(__file__).resolve().parents[1]/"build"/"libmijia_render.dylib"))
     lib.mijia_render.argtypes = [c.c_void_p, c.c_size_t, c.c_char_p, c.POINTER(c.c_void_p),
                                c.POINTER(c.c_uint32), c.POINTER(c.c_uint32), c.c_void_p, c.c_size_t]
     lib.mijia_render.restype = c.c_int

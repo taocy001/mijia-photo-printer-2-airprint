@@ -1,103 +1,126 @@
-# Mijia Instant Photo Printer 2 — experimental macOS AirPrint bridge
+# 米家照片打印机 2 · macOS 打印桥
 
-米家照片打印机 2 macOS 驱动实验项目。
+让 Mac 通过 USB 连接**米家照片打印机 2（ZMRSHZP02HT）**，再让同一局域网的 Mac / iPhone 通过 AirPrint 打印 **6 寸照片**。
 
-A user-space USB adapter and temporary IPP/Bonjour service for the Mijia Instant Photo Printer 2 (ZMRSHZP02HT, USB VID 302C / PID 3008). A real six-inch photograph has completed through the USB implementation and its output was confirmed by the operator. IPP discovery, capabilities and Validate-Job have passed local checks. The operator subsequently confirmed the tested iPhone photo workflow passed physical output verification.
+这是用户态 **AirPrint → USB 桥接程序**，不是小米官方驱动、内核驱动或苹果认证驱动。目前需要自行安装依赖、编译并手动启动；**没有已发布安装包、自动 CI 或默认开机服务**。
 
-## Scope
+## 已支持什么
 
-Six-inch 4×6-inch paper only (IPP `na_index-4x6_4x6in`, 10160×15240 hundredths of a millimeter). One page and one copy per job; up to 20 local queued jobs. No four-inch paper, multi-page printing, duplex, textured coating, automatic installation or system printer configuration.
+- 6 寸 4×6 英寸相纸，单页、单份；最多排队 20 个任务。
+- JPEG、单页未加密 PDF、受支持的单页 URF / PWG Raster。
+- 照片自动方向、等比铺满与最小裁切；不会拉伸或按白色像素盲裁。
+- 持久队列、设备忙时等待、状态查询和重复请求保护。不确定是否已经提交的任务会暂停，避免自动重复出纸。
 
-JPEG inputs default to centered fill: preserve aspect ratio and crop edges. Fit preserves the entire photo with white margins. EXIF orientation is applied and landscape content is rotated into the device's 1216×1824 buffer without stretching. Reverse orientations are supported. Recognized single-photo PDFs use the transformed image boundary for minimal-crop fill; ambiguous PDFs and URF/PWG preserve the client's page layout with fit. Requested zero margins describe the full device image canvas; precise mechanical edge tolerances have not been measured.
+在一台 Apple Silicon Mac、实际打印机和 6 寸相纸上，使用者已确认测试过的 iPhone 照片工作流出纸验证通过；Mac 系统打印路径也完成过测试。**这不代表所有客户端、格式、系统版本或固件均已实物验证。** 当前离线回归为 82 项。
 
-## Build
+不支持 4 寸、多页、双面、纹理覆膜；不会自动修改系统打印机、其他打印队列或防火墙。
 
-Requires macOS, Xcode command-line tools, Python 3 with Pillow and aiohttp already installed. No vendor DLL, Windows installer or third-party binary is distributed. Build output uses the host's arm64 SDK:
+## 从零准备
+
+需要 macOS、Xcode Command Line Tools、Python **3.10 或更新版本**、Git，以及能正常进行 USB 数据连接的打印机。当前主要验证平台是 Apple Silicon；构建脚本按本机架构编译，Intel 版本尚未做真机完整验证。最低兼容 macOS 版本尚未确定。
+
+1. 如果还没有开发工具，先运行 `xcode-select --install`，在系统界面完成安装。
+2. 确认 `python3 --version` 符合要求。Python 不随本项目提供。
+3. 下载仓库并在独立虚拟环境中安装依赖：
 
 ```sh
+git clone git@github.com:coverdh/mijia-photo-printer-2-airprint.git
+cd mijia-photo-printer-2-airprint
+python3 -m venv .venv
+source .venv/bin/activate
+python3 -m pip install -r requirements.txt
 ./build.sh
 ```
 
-The renderer accepts a single unencrypted PDF page or single 8-bit RGB/sRGB/gray URF/PWG page. Limits: 32 MiB request, 40 million decoded pixels, 30-second renderer timeout and 20 CPU seconds in a separate process. Arbitrary untrusted documents should not be considered comprehensively hardened by these limits.
+仓库目前为私有，clone 需要你自己的 GitHub 访问权限。构建生成 `build/` 内的两个原生库与测试辅助程序，并运行全部离线测试。预期末尾显示 `Ran 82 tests` 和 `OK`；测试只使用合成数据及本机临时 HTTP 服务，不操作真实 USB，也不打印。
 
-## Temporary service
+以后打开新终端，先回到仓库并运行 `source .venv/bin/activate`。
 
-Run manually, substituting the actual USB serial, local hostname, private LAN address and subnet. The serial is supplied at runtime, not committed:
+## 首次配置与启动
+
+先连接 USB、装好 6 寸耗材。到“系统信息 → USB”找到打印机的 USB 序列号；也可以运行 `system_profiler SPUSBDataType` 查看。请勿把自己的序列号提交到仓库。
+
+下面变量必须按自己的 Mac 和网络填写。`en0` 只是常见网卡名；可用 `networksetup -listallhardwareports` 核对。`LAN_CIDR` 是允许提交任务的局域网网段，不是单个 IP。
 
 ```sh
-python3 run_candidate.py --serial YOUR_USB_SERIAL \
-  --hostname YOUR_MAC.local --host YOUR_PRIVATE_LAN_IP --port 8632 \
-  --allow-network YOUR_LAN_CIDR --announce --enable-experimental-live-printing
+PRINTER_SERIAL='替换为打印机USB序列号'
+LAN_INTERFACE='en0'
+LAN_CIDR='替换为局域网CIDR，例如192.168.1.0/24'
+MAC_HOST="$(scutil --get LocalHostName).local"
+LAN_IP="$(ipconfig getifaddr "$LAN_INTERFACE")"
+
+python3 run_candidate.py \
+  --serial "$PRINTER_SERIAL" \
+  --hostname "$MAC_HOST" \
+  --host "$LAN_IP" \
+  --additional-host 127.0.0.1 \
+  --allow-network "$LAN_CIDR" \
+  --allow-network 127.0.0.0/8 \
+  --port 8632 --announce --enable-experimental-live-printing
 ```
 
-Bonjour name: **小米照片打印机 2**. Resource: `ipp/print`. Only bind to the current private LAN address. Source addresses must be loopback or within the configured subnet. This is plain IPP without authentication or TLS: devices on the allowed LAN can submit jobs. It does not configure internet forwarding, firewall rules, CUPS, other printer queues or login services.
+将所有“替换为…”内容填好再启动。`LAN_IP` 必须非空且是本机私有地址。`--enable-experimental-live-printing` 会允许后续客户端任务实际消耗相纸。
 
-The service runs until the foreground process ends. Ctrl-C stops it and unregisters its own Bonjour record. Restart manually with the same spool directory; no boot installation is performed. Pending work can continue after restart. Do not delete the spool while tasks are pending or uncertain.
+预期终端显示 `Running on ...:8632`，Bonjour 名称为 **小米照片打印机 2**。终端必须保持运行。网络换地址后需要用新的配置手动重启；本项目尚无自动网络配置功能。
 
-## Queue and duplicate protection
+**IPv6 网络：**如果 Mac 的 `.local` 名称还解析到 IPv6，需要为本机相应地址添加 `--additional-host`，并为来源网段添加 `--allow-network`；链路本地地址还需网卡作用域。不要绑定不属于本机的地址。具体参数说明见 `python3 run_candidate.py --help`。
 
-`queued_bridge.py` persists prepared JPEGs and job metadata under `airprint-spool/` using SQLite WAL/FULL synchronous commits. Only one executor uses USB. External device activity or an explicit 8006 queue-full rejection leaves a job pending for a later safe attempt. No job is dropped because the device is busy. A single-process lock prevents two live workers sharing the service spool.
+服务使用普通 IPP，没有登录认证或 TLS。允许网段内的设备能提交打印；只在可信局域网使用，不做公网端口转发。系统如询问局域网/入站连接权限，需要使用者自行决定是否允许，本项目不自动更改这些设置。
 
-Before creating a device job, it checks the actual job-id list and whole-device status. The empty `get-job-info {}` response is not used as proof of idle. Creation, device job ID, upload-start, upload-acknowledged and terminal stages are persisted. Creation/upload uncertainty stops the queue for read-only investigation; no automatic image replay or replacement job is created. After a restart, acknowledged uploads are only polled by the existing device job ID. Completed work is never replayed. Byte-identical IPP requests reuse the stored local job, including across restarts. A client retry with a new request ID cannot always be distinguished from a deliberate new print.
+## 在 Mac / iPhone 打印
 
-Cancel-Job cancels a still-local pending task without sending USB. An active cancellation targets only the device ID created for that local task and requires a matching client request; device cancellation is attempted once and status is subsequently polled. It never cancels jobs from other apps. Uncertain tasks remain held for investigation.
+- **iPhone：**连接同一局域网，在照片的分享菜单选择“打印”，选择“小米照片打印机 2”，确认 6 寸、1 份，再提交。
+- **Mac：**在“系统设置 → 打印机与扫描仪 → 添加打印机”选择该 Bonjour 打印机，使用 AirPrint。若自动发现不可用，可在 IP 页面选 IPP，地址填 `你的Mac主机名.local:8632`，队列填 `ipp/print`；完整 URI 为 `ipp://你的Mac主机名.local:8632/ipp/print`。
 
-Pending/processing/stopped/completed/aborted/canceled states are exposed through Get-Jobs and Get-Job-Attributes. Each job remains single-page/single-copy. Queue limits are 20 nonterminal tasks, 32 MiB per request, and 256 MiB for prepared spool images. Completed photo bytes are removed; metadata and bounded USB audit logs remain local. Spool content must never be committed or shared casually.
+添加系统打印队列是使用者的独立操作，启动桥本身不会添加。提交前确认没有误选其他同名设备。打印机可发现、预览正确或上传完成，都不等于已经正确出纸；以任务终态及实际成品为准。
 
-## Wire behavior established by device testing
+## 方向与裁切规则
 
-Control requests use `cmd json\n` plus compact JSON. Successful creation can omit `error-code` and return only `result.job_id`; omitted error-code defaults to zero, while explicit errors remain errors. Upload blocks contain a maximum 8192 image bytes, prefixed by `cmd data EXTLEN=N+4\n`, a little-endian 32-bit device job ID, and the bytes. A real successful ACK includes ` OK` after its decimal length. Fragmented replies and asynchronous events are handled. Upload completion is separate from physical completion: device state 9 is Completed, 7 Aborted and 8 Canceled.
+6 寸成品比例是横向 **3:2**、竖向 **2:3**，撕边不属于照片成品区域。
 
-The project implements only this printer's experimentally verified subset. No affiliation or official driver certification is claimed.
+默认 `fill` 会比较 0°/90° 两种摆放，选保留面积较多的一种，再居中等比铺满。瘦长竖图通常裁上下；其他比例可能裁左右。`fit` 则保留整张照片，允许白边。客户端明确指定的方向和 fit 请求不会被默认值覆盖。
 
-## Validation
+JPEG 先处理 EXIF 方向。能安全识别的单照片 PDF 按图像对象及变换边界取照片区域，再进行最小裁切；复杂 PDF、未知指令和 URF/PWG 保留整页版式，可能保留客户端已有白边。照片中的白墙、白衣等真实白色内容不会被当作边距裁掉。更多规则见 [开发说明](docs/development.md)。
 
-Offline tests use synthetic images/raster fixtures and sanitized protocol-only response fixtures. They cover FIFO, busy/8006 waiting, transport failure, lost ACK, restart behavior, cancellation scope, supported formats, six-inch media, orientations and scaling. No test automatically accesses USB or prints paper. Local service verification uses Get-Printer-Attributes, Get-Jobs and Validate-Job only.
+## 数据、停止与卸载
 
-For end-to-end validation, select the Bonjour name on an iPhone on the same LAN, select six-inch paper and one copy, and submit one photo. Check the local job state and actual paper. A discoverable Bonjour/IPP service alone is not proof of full AirPrint compatibility.
+运行数据位于**仓库根目录**，与启动终端的当前目录无关：
 
-## iPhone layout and receive-only diagnosis
+| 路径 | 内容 |
+| --- | --- |
+| `build/` | 本机编译产物，可重新构建 |
+| `airprint-spool/queue.sqlite*` | 持久任务队列及状态 |
+| `airprint-spool/*.jpg` | 等待发送的照片；终态后清理 |
+| `airprint-spool/ipp-metadata.jsonl` | 有限的请求属性/错误/生命周期日志，不含照片标题或图片字节 |
+| `airprint-spool/usb-audit.jsonl` | 有界 USB 协议审计日志 |
+| `airprint-spool/layout-evidence/` | 仅加 `--retain-layout-evidence` 后保存原输入/最终图；最多20份、256MiB，达到上限拒绝新渲染 |
+| `diagnostic-spool/` | 单独接收诊断工具的数据，默认不启动 |
 
-IPP scaling capabilities do not promise an iOS Photos crop editor. Only implemented fit/fill is advertised; unimplemented auto/auto-fit/none requests are rejected instead of silently becoming fit. Explicit fit is never overridden by the default fill. Placement is centered (only center is advertised); the fixed medium type is photographic. Orientation 3/4/5/6 applies to original JPEG rendering; best orientation is selected from EXIF-normalized content only when the client omits the direction constraint. Orientation 7 is not advertised and is not treated as auto. Pre-laid-out document pages are preserved without white-content trimming or a second photo crop.
+按 **Ctrl-C** 停止前台服务并撤销本服务的 Bonjour 广告。停止进程不会撤回打印机已经接收的任务；重启时已确认上传的任务按既有设备 ID 查询，不重放。待处理任务可能继续执行。
 
-Actual inbound format and layout attributes (excluding titles/user identities) are recorded in the local queue metadata. Until a real client submits a document, its format and embedded layout cannot be inferred from the iPhone preview alone.
+没有后台安装或开机项需要卸载。停止服务、确认没有待处理或不确定任务后，可以移除仓库和虚拟环境；照片/诊断数据是否保留由你决定。若手动添加过系统打印机，也需在系统设置中单独移除。不要在任务状态不明时删除队列。
 
-`run_capture.py` is a separate, opt-in diagnostic receiver on port 8633. It is NOT started by the normal service. It advertises **Mijia Layout Capture - NO PRINT**, stores exact original document bytes privately in diagnostic-spool, and has no USB scheduling path even after restart. It never promotes captured jobs into the live print queue. Ask the operator to confirm reception before starting it; then they can submit one sample to inspect the true page geometry without consuming paper. Limits are 20 captures, 32 MiB each, and 256 MiB total. Stop it with Ctrl-C; its data remains local until deliberately removed.
+## 常见问题
 
-## IPP transport compatibility and diagnostics
+- **找不到打印机：**检查终端服务是否仍在运行、同一网络、Bonjour是否被网络隔离，以及 `.local` 的IPv4/IPv6地址是否都正确监听。Mac睡眠或退出服务后不能继续充当打印桥。
+- **端口占用/已有worker：**检查是否已启动另一实例。不要对同一打印机同时运行两个桥，也不要删除进程锁绕过检查。
+- **USB打不开/一直等待：**核对型号、序列号、数据线、耗材和设备状态；其他应用的打印任务也可能占用设备。程序不会重置、强占或更新打印机固件。
+- **白边仍在：**检查客户端是否请求fit、输入是否为复杂PDF，必要时在知情情况下启用布局证据保存。不要反复提交同一照片试图“修复”不确定任务；这可能多次出纸。
+- **为什么相同照片有时合并：**可选 `--dedupe-content-window 秒数` 会在窗口内合并相同内容/选项的新请求，也会合并有意重复的照片；默认关闭。不需要时不添加该选项。
+- **报库/依赖找不到：**先激活虚拟环境，再执行 `./build.sh`。不要将另一架构或另一台机器的构建产物直接视作已验证安装包。
 
-The live queue supports both Print-Job and Create-Job followed by one final Send-Document. A Create-Job without a document is held locally and never sent to USB. Repeated Send-Document calls for the same document/local task reuse the existing task, including after completion; they never submit a second image. Non-final/multiple-document requests remain unsupported. Lightweight capability/status requests can run during document preparation. HTTP Expect: 100-continue and chunked input are tested on loopback without USB.
+## 仓库结构与开发
 
-Metadata-only IPP diagnostics record HTTP method, bounded route, content type/length, Expect/chunked flags, operation/request ID, allowlisted layout attributes and error status. They exclude usernames, document titles and image bytes. Logs rotate at 2 MiB. Raw document capture remains separately opt-in and is not enabled in the live service.
+```text
+src/             桥接、IPP、队列、图像处理和协议实现
+native/          自写IOKit USB及CoreGraphics/CUPS渲染辅助库
+tests/           离线回归及合成fixtures
+tools/           启动、离线准备、构建与测试工具
+docs/            架构、协议和诊断说明
+build.sh         兼容构建入口
+run_candidate.py 兼容启动入口
+run_capture.py   兼容诊断入口（不会自动启动）
+prepare.py       兼容离线JPEG准备入口（不打印）
+```
 
-When the advertised hostname publishes IPv6 addresses, bind the corresponding local address with --additional-host and authorize the matching local CIDR with --allow-network. Keep bindings on private/local addresses only. Bonjour re-registration changes this service only; no system-wide mDNS flushing is required. Seeing an old display name on a phone alone is not evidence of the failure's root cause.
-
-Automatic JPEG layout explicitly compares retained area for 0/90-degree placement and selects the lesser crop. Equal retained area preserves the EXIF-normalized natural direction. Explicit client fit/direction requests remain constraints, rather than being silently overridden by the photo default. Already-laid-out pages are never treated as a bag of removable white pixels.
-
-## Device readiness and photo quality compatibility
-
-A real iOS Photos request used PDF, one copy, 4x6 zero margins and print-quality=5. The bridge now advertises high quality as its default and accepts normal/high hints; both use the printer's fixed photo mode and bounded high-quality JPEG encoding, without claiming a new physical resolution. Rejecting this real high-quality hint had prevented the request from reaching the local queue.
-
-An empty device queue with category=sleep and error=0 is eligible for normal job creation, as the vendor treats both IDLE (20) and SLEEP (30) as ready-to-submit states. No guessed wake, reset or power command is sent. Other device activity/errors still wait.
-
-Optional --dedupe-content-window SECONDS conservatively reuses identical document/options tasks across changed client request IDs while active or within the configured terminal window. This can merge an intentional immediate duplicate photo submission; use it only when that tradeoff is desired. The default is disabled; exact request deduplication remains persistent regardless. It never replays an uncertain task.
-
-## PDF pixel scaling correction
-
-PDF points are explicitly mapped to output pixels with a uniform scale and centered placement. The page transform is composed at natural page size to preserve rotation and crop-box origin. Landscape pages use a landscape raster before the existing physical-paper orientation step. The previous renderer could leave a small point-sized page centered in a much larger pixel canvas; both portrait and landscape PDFs were affected. No content-based white trimming or second image crop is added.
-
-Synthetic regression coverage includes four edge markers, portrait/landscape pages, 90/270-degree page rotations, nonzero crop-box origins, UserUnit, intentional document margins, and landscape URF/PWG. All 75 offline tests pass. An observed faulty final upload was preserved privately and its geometry reproduced with a synthetic landscape PDF. The original client PDF was unavailable, so that earlier diagnosis did not by itself establish physical correctness. Later retained client PDFs and operator verification are described below.
-
-The manual temporary service records lifecycle events, renderer hash and persistent runtime output. Unexpected poller exceptions are logged without document data. This does not install a startup service or enable automatic restart.
-
-## Conservative photo PDF fill
-
-For fill requests, a single-image PDF with only balanced q/Q, matrix transforms and one image draw can use the image object's transformed rectangle as its photo boundary. The image must be centered, axis-aligned, fully within the page and span one whole page dimension. The other dimension must cover at least half the page. No annotations, masks, text, vector drawing, clipping, forms, inline images or multiple image draws are accepted. Ambiguous pages and explicit fit retain the page layout. White pixels within the photo are never trimmed. The resulting photo rectangle uses best orientation and uniform cover, minimizing removed content without stretching. This intentionally narrow recognizer may leave some client PDFs unchanged until their operators can be inspected safely.
-
-The optional --retain-layout-evidence flag saves original inputs and final raster uploads privately, mode 0600, under the spool's layout-evidence directory; at most 20 distinct documents and 256 MiB. It defaults off. At the limit new rendering is rejected instead of discarding evidence. These files must never be committed or uploaded with source. Previously completed jobs cannot be reconstructed after their inputs/output files were discarded.
-
-The photo-page recognizer also accepts the four standard rendering intents via ri (including the iPhone's Perceptual). The intent changes color handling, not geometry. Retained client PDFs showed that rejecting this operator caused both landscape and portrait pages to fall back to fit and preserve page padding. Both exact documents now recognize and re-render to full-canvas image bounds offline. Unknown intents and complex page operators still fall back. The 82-test suite compares decoded image pixels, avoiding unrelated embedded ICC profile timestamp differences. The operator subsequently confirmed the tested physical photo output passed verification; see the scope limits below.
-
-## Physical validation status
-
-After the iPhone PDF rendering-intent correction, the operator confirmed the physical photo output passed verification. This validates the tested photo workflow on the tested device and paper; it does not establish physical validation for every advertised input format, client application, media variant or future firmware. Offline regression coverage remains 82 tests.
+只重新测试可运行 `./tools/test.sh`（需已构建）。工具的 `--help` 不会连接打印机。协议细节见 [协议说明](docs/protocol.md)，第三方边界见 [第三方说明](NOTICE.md)。本仓库未声明新的开源许可证，不应据此假定已授予任意再分发许可。

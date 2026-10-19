@@ -10,3 +10,5 @@ airprint-spool/
 .DS_Store
 test-results.txt
 diagnostic-spool/
+build/
+.venv/
