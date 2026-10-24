@@ -341,8 +341,9 @@ class QueuedBridge(BridgeCore):
    current=next(x for x in self.rows() if x['id']==jid)
    if current['phase'] in ('creating','uploading'):
     self.change(jid,phase='unknown',message='Uncertain irreversible outcome; stopped, no replay: '+str(e))
-   elif 'integer job state required' in str(e):
-    self.change(jid,phase='aborted',message='Device job absent on device; aborted locally');self.stuck.pop(jid,None)
+   elif 'integer job state required' in str(e) or 'matching job absent or duplicated' in str(e):
+    self.change(jid,phase='aborted',message='Device job absent on device; aborted locally without replay');self.stuck.pop(jid,None)
+    Path(j['path']).unlink(missing_ok=True)
    else:self.change(jid,message='Connection/status unavailable; retained for read-only retry: '+str(e))
    self._disconnect()
  def _disconnect(self):

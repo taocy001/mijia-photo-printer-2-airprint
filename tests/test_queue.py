@@ -97,6 +97,14 @@ class QueueTests(unittest.TestCase):
   finally:queued_bridge.prepare_document=original
   self.assertEqual(called[0],{'scaling':'fill','rotate_180':False})
 
+ def test_absent_device_job_aborts_without_replay(self):
+  from protocol import ProtocolError
+  self.put();self.core.refresh();calls=self.peer.calls.count('print-job')
+  self.core.active_session.poll=lambda:(_ for _ in ()).throw(ProtocolError('matching job absent or duplicated; not proof of completion'))
+  self.core.refresh()
+  self.assertEqual(self.core.rows()[0]['phase'],'aborted')
+  self.assertEqual(self.peer.calls.count('print-job'),calls)
+  self.assertFalse(self.core.active_session)
  def test_device_held_maps_stopped_without_recreating(self):
   self.put();self.peer.state=4;self.core.refresh()
   self.assertEqual(self.core.rows()[0]['phase'],'held')
