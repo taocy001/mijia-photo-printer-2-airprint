@@ -4,12 +4,16 @@ from offline import decode_ipp,Attribute as A
 from bridge import integer
 from queued_bridge import QueuedBridge
 class Peer:
- def __init__(self):self.responses=[];self.calls=[];self.jid=80;self.polls=0;self.busy=False;self.reject8006=False;self.lost_ack=False;self.disconnected=False;self.state=3
+ def __init__(self):self.responses=[];self.calls=[];self.jid=80;self.polls=0;self.busy=False;self.reject8006=False;self.lost_ack=False;self.disconnected=False;self.state=3;self.alert_code=''
  def write(self,data,timeout):
   if data.startswith(b'cmd json\n'):
    c=json.loads(data[9:]);m=c['method'];self.calls.append(m)
    if m=='get-job-id-list':r={'job-id-list':'external' if self.busy else ''}
-   elif m=='get_prop':r={'category':'processing' if self.busy else 'idle','error':0}
+   elif m=='get_prop':
+    if c['params']==['printer-state-alerts']:r=['::'+(self.alert_code or '0')+'%']
+    elif c['params']==['media-size']:r=[{'media-size':5012}]
+    elif c['params']==['ribbon-info']:r=[{'ribbon-info':[1,1,38]}]
+    else:r={'category':'processing' if self.busy else 'idle','error':0}
    elif m=='print-job':
     if self.reject8006:self.reject8006=False;r={'error-code':8006}
     else:self.jid+=1;self.polls=0;r={'job_id':self.jid}
@@ -105,6 +109,18 @@ class QueueTests(unittest.TestCase):
   self.assertEqual(self.core.rows()[0]['phase'],'aborted')
   self.assertEqual(self.peer.calls.count('print-job'),calls)
   self.assertFalse(self.core.active_session)
+ def test_preflight_alert_blocks_job_creation(self):
+  self.peer.alert_code='5416';self.put();self.core.refresh()
+  self.assertEqual(self.core.rows()[0]['phase'],'pending');self.assertNotIn('print-job',self.peer.calls)
+  self.assertIn('5416',self.core.rows()[0]['message'])
+  self.peer.alert_code='';self.core.refresh();self.assertEqual(self.core.rows()[0]['phase'],'processing')
+ def test_held_fatal_alert_cancels_without_replay(self):
+  self.put();self.peer.state=4;self.core.refresh();calls=self.peer.calls.count('print-job')
+  self.peer.alert_code='5416';self.peer.polls=0;self.core.refresh()
+  self.assertEqual(self.core.rows()[0]['phase'],'aborted')
+  self.assertIn('5416',self.core.rows()[0]['message'])
+  self.assertEqual(self.peer.calls.count('print-job'),calls)
+  self.assertEqual(self.peer.calls.count('cancel-job'),1)
  def test_device_held_maps_stopped_without_recreating(self):
   self.put();self.peer.state=4;self.core.refresh()
   self.assertEqual(self.core.rows()[0]['phase'],'held')

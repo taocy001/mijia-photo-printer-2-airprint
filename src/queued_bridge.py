@@ -59,6 +59,12 @@ class QueuedBridge(BridgeCore):
    self.device_cache['ribbon']=ri[2] if ri and len(ri)>2 else None
   except Exception:pass
   self.device_cache['ts']=time.time()
+ def _alert_code(self,s):
+  try:
+   al=s.command('get_prop',['printer-state-alerts'])
+   self.device_cache['alerts']=al[0] if isinstance(al,list) and al else None
+   return str(al[0]).split(':')[-1].rstrip('%') if al else ''
+  except Exception:return ''
  def rows(self):
   with self.lock:return [dict(x) for x in self.db.execute('SELECT * FROM jobs ORDER BY id')]
  def change(self,jid,**fields):
@@ -287,6 +293,9 @@ class QueuedBridge(BridgeCore):
      self.change(jid,message='Waiting for device idle; external job or device alert');return
     # 按设备实际装载的相纸尺寸重排版 (相纸自适应: 避免6寸排版打到4寸纸上)
     self._query_device_cache(s)
+    code=self._alert_code(s)
+    if code and code!='0':
+     self.change(jid,message=f'Waiting for device alert to clear: {ALERT_CODE_CN.get(code,code)} ({code})');return
     media=self.device_cache['media'] or 5012
     _offline.LAST_DEVICE_MEDIA=media   # 供 _media_override 守卫: 非 6 寸托盘时拼接覆盖自动失效
     canvas=MEDIA_CANVAS.get(media)
@@ -320,6 +329,13 @@ class QueuedBridge(BridgeCore):
    # 透传子状态 (打印Y/M/C/K/覆膜/装纸/出纸) 让 iOS 进度提示更真实
    sub=info.get('job-sub-state');sub_cn=SUBSTATE_CN.get(sub) if isinstance(sub,int) else None
    self.change(jid,phase=phase,message='Device state: '+s.job.device_state.name+(' · '+sub_cn if sub_cn else ''),acked=info.get('transfer-size',s.job.uploaded_bytes))
+   if phase in ('held','waiting_device'):
+    code=self._alert_code(s)
+    if code and code not in ('0','5402','5306'):
+     try:s.cancel()
+     except Exception:pass
+     self.change(jid,phase='aborted',message=f'Device alert: {ALERT_CODE_CN.get(code,code)} ({code}); canceled without replay')
+     self.stuck.pop(jid,None);Path(j['path']).unlink(missing_ok=True);self._disconnect();return
    # 卡死看门狗: 设备侧任务状态/子状态长时间无进展 -> 取消设备任务并中止本地任务, 释放 USB
    now=time.time();sig=(phase,info.get('job-sub-state'))
    tr=self.stuck.setdefault(jid,[now,None,now])
