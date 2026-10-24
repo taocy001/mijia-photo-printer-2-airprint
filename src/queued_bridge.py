@@ -2,13 +2,28 @@
 import sqlite3,json,time,threading,hashlib,subprocess,sys,struct,os
 from pathlib import Path
 from bridge import BridgeCore,IppFailure,integer
-from offline import Attribute as A,Message,decode_ipp,encode_ipp,PreparedImage
-from documents import prepare_document
+from offline import Attribute as A,Message,decode_ipp,encode_ipp,PreparedImage,recompose_to_canvas,rotate180_pi,MEDIA_CANVAS,CANVAS,Unsupported
+import offline as _offline
+from offline import _media_override
+from documents import prepare_document,prepare_splice_document
 from protocol import PhotoSession,Job,DeviceJobState,ProtocolError
 TERMINAL=('completed','aborted','canceled')
 STATE={'receiving':4,'pending':3,'creating':5,'uploading':5,'uploaded':5,'processing':5,'unknown':6,'held':6,'waiting_device':3,'completed':9,'aborted':8,'canceled':7}
+SUBSTATE_CN={3002:'传输文件中',3017:'装纸中',3018:'打印黄色(Y)',3019:'打印品红(M)',3020:'打印青色(C)',3021:'覆膜中',3025:'回纸',3026:'出纸',3036:'打印黑色(K)',3005:'处理中',3001:'打印中',3014:'渲染中',3016:'解码中',2001:'初始化吐纸',2002:'低功耗'}
+# 告警文本 -> IPP printer-state-reasons 关键词 (按包含子串匹配)
+ALERT_MAP=[('paper','media-empty'),('纸','media-empty'),('tray','media-empty'),('cover','cover-open'),
+ ('盖','cover-open'),('ribbon','marker-supply-empty'),('色带','marker-supply-empty'),
+ ('jam','media-jam'),('卡','media-jam')]
+# 新固件告警为 "信息:警告:错误" 数字码格式 (如 "::5402"); 码表逆向自 Mi.Model alerts_syrup.xml
+ALERT_CODE_MAP={'5304':'media-empty','5306':'media-empty','5402':'media-empty','5403':'media-jam',
+ '5414':'media-empty','5416':'media-empty',
+ '8101':'marker-supply-empty','8102':'marker-supply-empty','8103':'marker-supply-empty',
+ '8104':'marker-supply-empty','8199':'marker-supply-empty'}
+ALERT_CODE_CN={'5304':'相纸尺寸不符','5306':'纸盒未安装','5402':'缺纸或装纸失败','5403':'卡纸',
+ '5414':'相纸长度异常','5416':'相纸尺寸异常','8101':'色带用完','8102':'色带已空','8103':'未识别色带',
+ '8104':'色带类型不符','8199':'色带错误'}
 class QueuedBridge(BridgeCore):
- def __init__(self,uri,transport_factory,spool,*,isolated_render=True,dedupe_seconds=0,retain_layout_evidence=False):
+ def __init__(self,uri,transport_factory,spool,*,isolated_render=True,dedupe_seconds=0,retain_layout_evidence=False,idle_status_seconds=0):
   super().__init__(uri,transport_factory)
   self.lock=threading.RLock()
   self.dedupe_seconds=dedupe_seconds
@@ -22,7 +37,28 @@ class QueuedBridge(BridgeCore):
   for col in ('template','document_key','content_key'):
    if col not in [r[1] for r in self.db.execute('PRAGMA table_info(jobs)')]:self.db.execute('ALTER TABLE jobs ADD COLUMN '+col+' TEXT')
   self.db.commit()
-  self.isolated_render=isolated_render;self.usb_lock=threading.Lock();self.active_session=None;self.active_id=None;self.stopping=False
+  self.isolated_render=isolated_render;self.usb_lock=threading.Lock();self.active_session=None;self.active_id=None;self.stopping=False;self.stuck={}
+  # 设备状态缓存: 空闲时定期查询 (默认关闭, 由 --idle-status-refresh 开启), 供 IPP 属性应答
+  self.device_cache={'media':None,'alerts':None,'ribbon':None,'ts':0}
+  self.idle_status_seconds=idle_status_seconds
+ def _query_device_cache(self,s):
+  """在已建立的会话上读取状态并写入缓存 (best-effort, 失败不中断打印)"""
+  try:
+   ms=s.command('get_prop',['media-size'])
+   m0=ms[0] if isinstance(ms,list) and ms else {}
+   self.device_cache['media']=int(m0.get('media-size',5012)) if isinstance(m0,dict) else 5012
+   _offline.LAST_DEVICE_MEDIA=self.device_cache['media']   # 让渲染期的拼接覆盖守卫也用新鲜值
+  except Exception:pass
+  try:
+   al=s.command('get_prop',['printer-state-alerts'])
+   self.device_cache['alerts']=al[0] if isinstance(al,list) and al else None
+  except Exception:pass
+  try:
+   rb=s.command('get_prop',['ribbon-info'])
+   ri=rb[0].get('ribbon-info') if isinstance(rb,list) and rb and isinstance(rb[0],dict) else None
+   self.device_cache['ribbon']=ri[2] if ri and len(ri)>2 else None
+  except Exception:pass
+  self.device_cache['ts']=time.time()
  def rows(self):
   with self.lock:return [dict(x) for x in self.db.execute('SELECT * FROM jobs ORDER BY id')]
  def change(self,jid,**fields):
@@ -34,8 +70,37 @@ class QueuedBridge(BridgeCore):
   return [A(2,0x21,'job-id',integer(j['id'])),A(2,0x45,'job-uri',(self.uri+'/jobs/'+str(j['id'])).encode()),A(2,0x23,'job-state',integer(state)),A(2,0x44,'job-state-reasons',reason.encode()),A(2,0x41,'job-state-message',j['message'].encode()[:512])]
  def printer_attributes(self):
   base=super().printer_attributes();rows=self.rows();n=sum(x['phase'] not in TERMINAL for x in rows);unknown=any(x['phase']=='unknown' for x in rows);busy=any(x['phase'] in ('creating','uploading','uploaded','processing') for x in rows)
-  changes={'queued-job-count':integer(n),'printer-state':integer(5 if unknown else 4 if busy else 3),'printer-is-accepting-jobs':bytes([n<20 and not unknown]),'printer-state-message':b'Six inch only; persistent FIFO; one copy per job','printer-state-reasons':b'paused' if unknown else b'none'}
-  return [A(a.group,a.tag,a.name,changes.get(a.name,a.value)) for a in base]+[A(4,0x23,"operations-supported",integer(x)) for x in (5,6)]
+  # 设备告警 -> IPP printer-state-reasons
+  reasons=[];alert_cn=''
+  if self.device_cache['alerts']:
+   txt=str(self.device_cache['alerts'])
+   for pat,kw in ALERT_MAP:
+    if pat in txt and kw not in reasons:reasons.append(kw)
+   for fld in txt.split(':')[1:]:
+    for code in fld.replace(',',' ').split():
+     kw=ALERT_CODE_MAP.get(code)
+     if kw and kw not in reasons:reasons.append(kw)
+     if not alert_cn and code in ALERT_CODE_CN:alert_cn=ALERT_CODE_CN[code]+'('+code+')'
+  if unknown and 'paused' not in reasons:reasons.append('paused')
+  # 有告警时 printer-state-message 直接显示中文原因 (Mac/iOS 打印对话框可见); 平时显示当前纸型
+  media=self.device_cache['media'] or 5012
+  ov=_media_override()
+  PAPER_CN={5009:'3寸方形背胶(即贴)',5012:'6寸',5014:'6寸双拼'}
+  paper_txt=('6寸托盘·按4寸拼接版打印' if ov==5014 and media==5012 else PAPER_CN.get(media,str(media)))
+  msg=('⚠ '+alert_cn) if alert_cn else f'就绪 · 当前相纸: {paper_txt}'
+  changes={'queued-job-count':integer(n),'printer-state':integer(5 if unknown else 4 if busy else 3),'printer-is-accepting-jobs':bytes([n<20 and not unknown]),'printer-state-message':msg.encode(),'printer-state-reasons':b','.join(x.encode() for x in reasons) if reasons else b'none'}
+  out=[A(a.group,a.tag,a.name,changes.get(a.name,a.value)) for a in base]+[A(4,0x23,"operations-supported",integer(x)) for x in (5,6)]
+  # 色带余量 -> marker-supplies (Mac/iOS 打印对话框显示剩余色带)
+  if self.device_cache['ribbon'] is not None:
+   try:pct=max(0,min(100,round(int(self.device_cache['ribbon'])/40*100)))
+   except (TypeError,ValueError):pct=-1
+   out+=[A(4,0x44,'marker-types',b'ribbon'),A(4,0x42,'marker-names','色带剩余(张数)'.encode()),
+    A(4,0x21,'marker-levels',integer(pct)),A(4,0x42,'marker-colors',b'#A0A0A0')]
+  # 当前装载相纸提示
+  if self.device_cache['media']:
+   mn={5009:'3寸方形背胶(即贴)',5012:'6寸',5014:'6寸双拼'}.get(self.device_cache['media'])
+   if mn:out.append(A(4,0x41,'printer-more-info',f'当前相纸: {paper_txt}'.encode()))
+  return out
  def retain_evidence(self,req,mime,image=None):
   if not self.retain_layout_evidence:return
   root=self.spool/'layout-evidence';root.mkdir(mode=0o700,exist_ok=True)
@@ -56,6 +121,19 @@ class QueuedBridge(BridgeCore):
    values=req.values('orientation-requested')
    orientation=struct.unpack('>i',values[0])[0] if values else None
    if orientation is not None:reverse=False
+  # 5014 拼接版(纸盒恒报5012, 网页切纸型写覆盖文件): 1张->上下两半相同; 2页PDF->上下各一
+  if _media_override()==5014:
+   try:
+    if not self.isolated_render:
+     image=prepare_splice_document(req.document,mime,scaling=scaling)
+    else:
+     r=subprocess.run([sys.executable,str(Path(__file__).with_name('render_worker.py'))],input=json.dumps({'mime':mime,'scaling':scaling,'splice':True}).encode()+b'\n'+req.document,capture_output=True,timeout=30,check=True)
+     image=PreparedImage(r.stdout,0)
+    self.retain_evidence(req,mime,image);return image
+   except Unsupported:pass   # URF/PWG 等不可拆页: 回退普通整版渲染
+   except subprocess.CalledProcessError as e:
+    if e.returncode!=2:raise IppFailure(0x040b,'document renderer rejected input') from e
+   except (subprocess.SubprocessError,OSError) as e:raise IppFailure(0x040b,'document renderer rejected input') from e
   if not self.isolated_render:
    kwargs={'scaling':scaling,'rotate_180':reverse}
    if mime=='image/jpeg':kwargs['orientation']=orientation
@@ -185,7 +263,16 @@ class QueuedBridge(BridgeCore):
   rows=self.rows()
   if any(j['phase']=='unknown' for j in rows):return
   jobs=[j for j in rows if j['phase'] not in TERMINAL and j['phase']!='receiving']
-  if not jobs:return
+  if not jobs:
+   # 空闲时低速刷新设备状态缓存 (可选, 供 IPP 属性应答: 余量/告警/相纸)
+   if self.idle_status_seconds>0 and self.transport_factory is not None and time.time()-self.device_cache['ts']>self.idle_status_seconds:
+    s=None
+    try:
+     s=PhotoSession(self.audited(self.transport_factory(),None));self._query_device_cache(s)
+    except Exception:pass
+    finally:
+     if s is not None and hasattr(s.transport,'close'):s.transport.close()
+   return
   j=jobs[0];jid=j['id'];s=self.active_session
   try:
    if s is None or self.active_id!=jid:
@@ -198,11 +285,23 @@ class QueuedBridge(BridgeCore):
     if not isinstance(ids,dict) or not isinstance(status,dict):raise ProtocolError('invalid readiness response')
     if ids.get('job-id-list') not in ('',[]) or status.get('category') not in ('idle','sleep') or status.get('error')!=0:
      self.change(jid,message='Waiting for device idle; external job or device alert');return
+    # 按设备实际装载的相纸尺寸重排版 (相纸自适应: 避免6寸排版打到4寸纸上)
+    self._query_device_cache(s)
+    media=self.device_cache['media'] or 5012
+    _offline.LAST_DEVICE_MEDIA=media   # 供 _media_override 守卫: 非 6 寸托盘时拼接覆盖自动失效
+    canvas=MEDIA_CANVAS.get(media)
+    image=PreparedImage(Path(j['path']).read_bytes(),0)
+    if canvas and canvas!=CANVAS:
+     image=recompose_to_canvas(image.jpeg,canvas)
+     self.change(jid,message=f'Re-composed for loaded media-size {media}')
+    if media==5009:
+     image=rotate180_pi(image)   # 方形背胶纸: 固件顶部留物理白边, 旋转 180° 落到底部
+     self.change(jid,message='Rotated 180° for square sticky media')
     with self.lock:
      current=self.db.execute('SELECT phase FROM jobs WHERE id=?',(jid,)).fetchone()
      if current['phase']!='pending':return
      self.change(jid,phase='creating',message='Creating one device job')
-    try:s.create(PreparedImage(Path(j['path']).read_bytes(),0))
+    try:s.create(image)
     except ProtocolError as e:
      if str(e)=='print-job rejected: 8006':
       self.change(jid,phase='pending',message='Device queue full; safe wait before next attempt');self._disconnect();return
@@ -218,13 +317,32 @@ class QueuedBridge(BridgeCore):
     s.cancel()
    info=s.poll();phase=s.job.phase
    if phase not in TERMINAL:phase='held' if s.job.device_state==DeviceJobState.PROCESSING_HELD else 'waiting_device' if s.job.device_state in (DeviceJobState.WAITING,DeviceJobState.PENDING) else 'processing'
-   self.change(jid,phase=phase,message='Device state: '+s.job.device_state.name,acked=info.get('transfer-size',s.job.uploaded_bytes))
+   # 透传子状态 (打印Y/M/C/K/覆膜/装纸/出纸) 让 iOS 进度提示更真实
+   sub=info.get('job-sub-state');sub_cn=SUBSTATE_CN.get(sub) if isinstance(sub,int) else None
+   self.change(jid,phase=phase,message='Device state: '+s.job.device_state.name+(' · '+sub_cn if sub_cn else ''),acked=info.get('transfer-size',s.job.uploaded_bytes))
+   # 卡死看门狗: 设备侧任务状态/子状态长时间无进展 -> 取消设备任务并中止本地任务, 释放 USB
+   now=time.time();sig=(phase,info.get('job-sub-state'))
+   tr=self.stuck.setdefault(jid,[now,None,now])
+   if sig!=tr[1]:tr[1]=sig;tr[2]=now
+   lim=180 if phase=='waiting_device' else 600
+   if now-tr[2]>lim or now-tr[0]>900:
+    alert=''
+    try:
+     al=s.command('get_prop',['printer-state-alerts']);code=str(al[0]).split(':')[-1] if al else ''
+     if code and code!='0':alert='; device alert '+code
+    except Exception:pass
+    try:s.cancel()
+    except Exception:pass
+    self.change(jid,phase='aborted',message='Device job stalled'+alert+'; canceled and USB released');self.stuck.pop(jid,None)
+    Path(j['path']).unlink(missing_ok=True);self._disconnect();return
    if phase in TERMINAL:
-    Path(j['path']).unlink(missing_ok=True);self._disconnect()
+    self.stuck.pop(jid,None);Path(j['path']).unlink(missing_ok=True);self._disconnect()
   except Exception as e:
    current=next(x for x in self.rows() if x['id']==jid)
    if current['phase'] in ('creating','uploading'):
     self.change(jid,phase='unknown',message='Uncertain irreversible outcome; stopped, no replay: '+str(e))
+   elif 'integer job state required' in str(e):
+    self.change(jid,phase='aborted',message='Device job absent on device; aborted locally');self.stuck.pop(jid,None)
    else:self.change(jid,message='Connection/status unavailable; retained for read-only retry: '+str(e))
    self._disconnect()
  def _disconnect(self):

@@ -36,6 +36,7 @@ def main():
     parser.add_argument("--dedupe-content-window",type=int,default=0)
     parser.add_argument("--retain-layout-evidence",action="store_true",help="Opt-in private original/final diagnostics, 20 documents and 256 MiB maximum")
     parser.add_argument("--announce", action="store_true")
+    parser.add_argument("--idle-status-refresh", type=int, default=0, metavar="SECONDS", help="poll device supply/alert status while idle (0=off, recommended 60)")
     parser.add_argument("--allow-network",action="append",default=[])
     parser.add_argument("--enable-experimental-live-printing", action="store_true")
     args = parser.parse_args()
@@ -56,7 +57,7 @@ def main():
     lock_handle=process_lock.open('a')
     try:fcntl.flock(lock_handle,fcntl.LOCK_EX|fcntl.LOCK_NB)
     except BlockingIOError:parser.error('another queue worker owns this spool')
-    core=QueuedBridge(f"ipp://{args.hostname}:{args.port}/ipp/print",transport,root/"airprint-spool",dedupe_seconds=args.dedupe_content_window,retain_layout_evidence=args.retain_layout_evidence)
+    core=QueuedBridge(f"ipp://{args.hostname}:{args.port}/ipp/print",transport,root/"airprint-spool",dedupe_seconds=args.dedupe_content_window,retain_layout_evidence=args.retain_layout_evidence,idle_status_seconds=args.idle_status_refresh)
     # No socket or subprocess is created before this explicit main() path.
     import os,hashlib
     from ipp_trace import record

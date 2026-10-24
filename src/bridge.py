@@ -326,7 +326,21 @@ def make_app(core=None, *, allowed_networks=None):
             return web.Response(body=response,content_type="application/ipp")
         except Unsupported:
             return web.Response(status=400,text="invalid IPP request")
+    async def status_json(request):
+        """供网页版在 USB 被桥占用时回退查询: 桥忙闲 + 设备状态缓存 (media/alerts/ribbon/ts)"""
+        if allowed_networks:
+            try:
+                peer=ipaddress.ip_address(request.remote)
+                if not peer.is_loopback and not any(peer in ipaddress.ip_network(n) for n in allowed_networks):
+                    return web.Response(status=403,text="local network only")
+            except ValueError:return web.Response(status=403)
+        import json as _json
+        cache=getattr(core,'device_cache',{})
+        rows=core.rows() if hasattr(core,'rows') else []
+        busy=any(j['phase'] not in ('completed','aborted','canceled') for j in rows)
+        return web.Response(text=_json.dumps({'busy':busy,'device':cache},ensure_ascii=False),content_type='application/json')
     app = web.Application(client_max_size=32*1024*1024,middlewares=[trace])
+    app.router.add_get("/status.json",status_json)
     app.router.add_post("/ipp/print",post)
     app.router.add_post("/ipp/print/",post)
     app.router.add_post("/ipp/print/jobs/{job_id}",post)

@@ -5,6 +5,7 @@ portable implementation, not a byte-identical ImageMagick reproduction.
 """
 from dataclasses import dataclass
 from io import BytesIO
+import os
 import struct
 from PIL import Image, ImageOps, ImageCms
 
@@ -12,6 +13,25 @@ CANVAS = (1216, 1824)
 TARGET_BYTES = 512 * 1024
 MEDIA_SIZE = 5012
 CHANNEL = 0xFB00
+
+# 实测相纸规格(media-size) -> 像素画布 @300dpi (米家桌面照片打印机2, ZMRSHZP02HT)
+MEDIA_CANVAS = {5009: (1040, 1040), 5012: (1216, 1824), 5014: (1216, 912)}
+CANVAS_MEDIA = {v: k for k, v in MEDIA_CANVAS.items()}
+
+
+def _media_override():
+    """拼接版相纸(5014)纸盒上报恒为 5012; 外部覆盖文件逐任务读取 (网页切纸型即写此文件).
+    仅托盘实际上报 5012 时生效——换成方形背胶等其他纸后覆盖自动失效, 防止 5416 拒收"""
+    try:
+        if LAST_DEVICE_MEDIA is not None and LAST_DEVICE_MEDIA != 5012:
+            return None
+        with open(os.environ.get('MIJIA_MEDIA_OVERRIDE_FILE', 'airprint-spool/media-override.txt')) as f:
+            return int(f.read().strip()) or None
+    except Exception:
+        return None
+
+
+LAST_DEVICE_MEDIA = None   # 每次任务前由 queued_bridge 写入 (设备托盘实际上报值)
 
 
 class Unsupported(ValueError):
@@ -41,16 +61,9 @@ class PreparedImage:
     size: tuple[int, int] = CANVAS
 
 
-def prepare_jpeg(data: bytes, *, scaling="fill", rotate_180=False, centering=(0.5,0.5), orientation=None) -> PreparedImage:
-    """EXIF orient, fit/fill portrait canvas, flatten white, JPEG quality 60..100.
-
-    fill: centered crop; fit: preserve whole image with white bars. These are
-    bridge policies for the vendor's full-frame/adaptive choices, not proof of
-    its precise resampling kernel or crop anchor. 180-degree rotation is opt-in
-    because the Windows caller applies it conditionally.
-    """
-    if scaling not in ("fill", "fit"):
-        raise Unsupported("only fill and fit are implemented")
+def load_jpeg_pil(data: bytes) -> "Image.Image":
+    """Decode JPEG with EXIF orientation and ICC->sRGB flattening; shared by
+    single-canvas and splice composition paths."""
     if len(data) > 32 * 1024 * 1024:
         raise Unsupported("image exceeds offline input limit")
     try:
@@ -70,6 +83,20 @@ def prepare_jpeg(data: bytes, *, scaling="fill", rotate_180=False, centering=(0.
                     ImageCms.createProfile("sRGB"), outputMode="RGB")
             except (OSError, ValueError, ImageCms.PyCMSError) as exc:
                 raise Unsupported("invalid or unsupported embedded ICC profile") from exc
+    return image
+
+
+def prepare_jpeg(data: bytes, *, scaling="fill", rotate_180=False, centering=(0.5,0.5), orientation=None) -> PreparedImage:
+    """EXIF orient, fit/fill portrait canvas, flatten white, JPEG quality 60..100.
+
+    fill: centered crop; fit: preserve whole image with white bars. These are
+    bridge policies for the vendor's full-frame/adaptive choices, not proof of
+    its precise resampling kernel or crop anchor. 180-degree rotation is opt-in
+    because the Windows caller applies it conditionally.
+    """
+    if scaling not in ("fill", "fit"):
+        raise Unsupported("only fill and fit are implemented")
+    image = load_jpeg_pil(data)
     return prepare_rgb(image.tobytes(), image.width, image.height,
                        scaling=scaling, rotate_180=rotate_180, centering=centering, orientation=orientation)
 
@@ -140,12 +167,13 @@ def job_model(image: PreparedImage, *, copies=1, sharpen_mode=0, oc: bytes | Non
     if sharpen_mode != 0:
         raise Unsupported("only explicitly selected sharpen mode 0 is modeled")
     with Image.open(BytesIO(image.jpeg)) as check:
-        if check.format != "JPEG" or check.size != CANVAS:
-            raise Unsupported("prepared data is not a 1216x1824 JPEG")
+        if check.format != "JPEG" or check.size not in CANVAS_MEDIA:
+            raise Unsupported("prepared data is not a supported-canvas JPEG")
+    media_size = _media_override() or CANVAS_MEDIA.get(image.size, MEDIA_SIZE)
     return {
         "method": "print-job",
         "params": {"copies": copies, "file-size": len(image.jpeg),
-                   "job-type": 0, "file-type": "jpg", "media-size": MEDIA_SIZE,
+                   "job-type": 0, "file-type": "jpg", "media-size": media_size,
                    "channel": CHANNEL, "sharpenmode": sharpen_mode},
         "upload-order": ["photo.jpg"],
         "usb-frame": None,
@@ -155,6 +183,73 @@ def job_model(image: PreparedImage, *, copies=1, sharpen_mode=0, oc: bytes | Non
                      "physical image orientation and usable boundary",
                      "Apple client AirPrint interoperability"],
     }
+
+
+def recompose_to_canvas(jpeg: bytes, canvas: tuple[int, int]) -> PreparedImage:
+    """打印时按设备实际装载相纸二次排版: 居中裁切到目标比例后缩放。
+    用于 media-size 非默认 5012 时, 从已渲染的 1216x1824 JPEG 重生成。"""
+    if canvas not in CANVAS_MEDIA:
+        raise Unsupported("unknown target canvas")
+    with Image.open(BytesIO(jpeg)) as src:
+        im = src.convert("RGB")
+        tw, th = canvas
+        ratio = tw / th
+        cur = im.width / im.height
+        if cur > ratio:  # 太宽 -> 裁左右
+            nw = round(im.height * ratio)
+            x = (im.width - nw) // 2
+            im = im.crop((x, 0, x + nw, im.height))
+        elif cur < ratio:  # 太高 -> 裁上下
+            nh = round(im.width / ratio)
+            y = (im.height - nh) // 2
+            im = im.crop((0, y, im.width, y + nh))
+        im = im.resize(canvas, Image.LANCZOS)
+        out = BytesIO()
+        im.save(out, "JPEG", quality=95, subsampling=0)
+        return PreparedImage(out.getvalue(), 95, canvas)
+
+
+def rotate180_pi(image: PreparedImage) -> PreparedImage:
+    """方形背胶相纸(5009): 固件在画布顶部留物理白边, 旋转180°使其落在照片底部"""
+    with Image.open(BytesIO(image.jpeg)) as src:
+        im = src.convert("RGB").rotate(180)
+        out = BytesIO()
+        im.save(out, "JPEG", quality=95, subsampling=0)
+        return PreparedImage(out.getvalue(), 95, image.size)
+
+
+SPLICE_HALF = (CANVAS[0], CANVAS[1] // 2)   # 5014 每半 1216x912 (横版 4:3)
+
+
+def compose_splice(images, *, scaling="fill") -> PreparedImage:
+    """5014 拼接版(可撕成上下两张)排版: 整版仍是 1216x1824, 上下两半(各1216x912)
+    各放一张; 只有 1 张时两半相同. 与 mijia.py make_splice_jpeg 的实测映射一致
+    (无旋转, 顶半贴在 (0,0), 底半贴在 (0,912)). 发送时 media-size 必须为 5014,
+    按 5012 下发会被纸长校验拒绝(5416)空吐纸."""
+    if scaling not in ("fill", "fit"):
+        raise Unsupported("only fill and fit are implemented")
+    if not images:
+        raise Unsupported("splice needs at least one image")
+    hw, hh = SPLICE_HALF
+    halves = []
+    for im in images[:2]:
+        im = im.convert("RGB")
+        if scaling == "fill":
+            halves.append(ImageOps.fit(im, (hw, hh), Image.Resampling.LANCZOS))
+        else:
+            inner = ImageOps.contain(im, (hw, hh), Image.Resampling.LANCZOS)
+            frame = Image.new("RGB", (hw, hh), "white")
+            frame.paste(inner, ((hw - inner.width) // 2, (hh - inner.height) // 2))
+            halves.append(frame)
+    if len(halves) == 1:
+        halves = halves * 2
+    canvas = Image.new("RGB", CANVAS, "white")
+    canvas.paste(halves[0], (0, 0))
+    canvas.paste(halves[1], (0, hh))
+    out = BytesIO()
+    srgb = ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")).tobytes()
+    canvas.save(out, "JPEG", quality=95, subsampling=0, icc_profile=srgb)
+    return PreparedImage(out.getvalue(), 95, CANVAS)
 
 
 # IPP subset for offline binary fixtures. No network transport is implemented.
